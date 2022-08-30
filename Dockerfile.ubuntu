@@ -1,0 +1,4 @@
+FROM golang:latest
+
+ADD . $GOPATH/src/github.com/mattscamp/zerousb
+RUN cd $GOPATH/src/github.com/mattscamp/zerousb && go install
