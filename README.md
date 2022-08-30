@@ -1,7 +1,3 @@
-[![Travis][travisimg]][travisurl]
-[![AppVeyor][appveyorimg]][appveyorurl]
-[![GoDoc][docimg]][docurl]
-
 # zerousb
 
 The `zerousb` package is the simplest wrapper around the native `libusb` library.
