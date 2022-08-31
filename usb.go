@@ -264,7 +264,7 @@ func (dev *libusbDevice) DetachKernelDriver() error {
 	return nil
 }
 
-func (dev *libusbDevice) readBulk(b []byte) (int, error) {
+func (dev *libusbDevice) readInterrupt(b []byte) (int, error) {
 	var transferred C.int
 	if err := fromLibusbErrno(C.libusb_interrupt_transfer(dev.handle, (C.uchar)(*dev.libusbReader), (*C.uchar)(&b[0]), (C.int)(len(b)), &transferred, (C.uint)(0))); err != nil {
 		return 0, fmt.Errorf("failed to read from device: %v", err)
@@ -272,7 +272,7 @@ func (dev *libusbDevice) readBulk(b []byte) (int, error) {
 	return int(transferred), nil
 }
 
-func (dev *libusbDevice) readInterrupt(b []byte) (int, error) {
+func (dev *libusbDevice) readBulk(b []byte) (int, error) {
 	var transferred C.int
 	if err := fromLibusbErrno(C.libusb_bulk_transfer(dev.handle, (C.uchar)(*dev.libusbReader), (*C.uchar)(&b[0]), (C.int)(len(b)), &transferred, (C.uint)(0))); err != nil {
 		return 0, fmt.Errorf("failed to read from device: %v", err)
