@@ -16,6 +16,25 @@ import (
 	"unsafe"
 )
 
+type libusbContext C.libusb_context
+
+type Context struct {
+	ctx    *libusbContext
+	done   chan struct{}
+	libusb libusbDevice
+
+	mu      sync.Mutex
+	devices map[*Device]bool
+}
+
+// libusbDevice is a USB connected device handle.
+type libusbDevice struct {
+	DeviceInfo // Embed the infos for easier access
+
+	handle *C.struct_libusb_device_handle // Low level USB device to communicate through
+	lock   sync.Mutex
+}
+
 // enumerateRawWithRef is the internal device enumerator that retains 1 reference
 // to every matched device so they may selectively be opened on request.
 func getAllDevices(vendorID ID, productID ID) ([]DeviceInfo, error) {
@@ -193,14 +212,6 @@ func open(info DeviceInfo) (*libusbDevice, error) {
 	}, nil
 }
 
-// libusbDevice is a USB connected device handle.
-type libusbDevice struct {
-	DeviceInfo // Embed the infos for easier access
-
-	handle *C.struct_libusb_device_handle // Low level USB device to communicate through
-	lock   sync.Mutex
-}
-
 // Close releases the raw USB device handle.
 func (dev *libusbDevice) Close() error {
 	dev.lock.Lock()
@@ -217,30 +228,30 @@ func (dev *libusbDevice) Close() error {
 }
 
 // Write sends a binary blob to an USB device.
-func (dev *libusbDevice) Write(b []byte) (int, error) {
+func (dev *libusbDevice) Write(b []byte, timeout int) (int, error) {
 	dev.lock.Lock()
 	defer dev.lock.Unlock()
 
 	switch *dev.writerTransferType {
 	case C.LIBUSB_TRANSFER_TYPE_INTERRUPT:
-		return dev.writeInterrupt(b)
+		return dev.writeInterrupt(b, timeout)
 	case C.LIBUSB_TRANSFER_TYPE_BULK:
-		return dev.writeBulk(b)
+		return dev.writeBulk(b, timeout)
 	}
 
 	return 0, fmt.Errorf("device transfer type unsupported %v", dev.readerTransferType)
 }
 
 // Read retrieves a binary blob from an USB device.
-func (dev *libusbDevice) Read(b []byte) (int, error) {
+func (dev *libusbDevice) Read(b []byte, timeout int) (int, error) {
 	dev.lock.Lock()
 	defer dev.lock.Unlock()
 
 	switch *dev.readerTransferType {
 	case C.LIBUSB_TRANSFER_TYPE_INTERRUPT:
-		return dev.readInterrupt(b)
+		return dev.readInterrupt(b, timeout)
 	case C.LIBUSB_TRANSFER_TYPE_BULK:
-		return dev.readBulk(b)
+		return dev.readBulk(b, timeout)
 	}
 
 	return 0, fmt.Errorf("device transfer type unsupported %v", dev.readerTransferType)
@@ -264,33 +275,33 @@ func (dev *libusbDevice) DetachKernelDriver() error {
 	return nil
 }
 
-func (dev *libusbDevice) readInterrupt(b []byte) (int, error) {
+func (dev *libusbDevice) readInterrupt(b []byte, timeout int) (int, error) {
 	var transferred C.int
-	if err := fromLibusbErrno(C.libusb_interrupt_transfer(dev.handle, (C.uchar)(*dev.libusbReader), (*C.uchar)(&b[0]), (C.int)(len(b)), &transferred, (C.uint)(0))); err != nil {
+	if err := fromLibusbErrno(C.libusb_interrupt_transfer(dev.handle, (C.uchar)(*dev.libusbReader), (*C.uchar)(&b[0]), (C.int)(len(b)), &transferred, (C.uint)(timeout))); err != nil {
 		return 0, fmt.Errorf("failed to read from device: %v", err)
 	}
 	return int(transferred), nil
 }
 
-func (dev *libusbDevice) readBulk(b []byte) (int, error) {
+func (dev *libusbDevice) readBulk(b []byte, timeout int) (int, error) {
 	var transferred C.int
-	if err := fromLibusbErrno(C.libusb_bulk_transfer(dev.handle, (C.uchar)(*dev.libusbReader), (*C.uchar)(&b[0]), (C.int)(len(b)), &transferred, (C.uint)(0))); err != nil {
+	if err := fromLibusbErrno(C.libusb_bulk_transfer(dev.handle, (C.uchar)(*dev.libusbReader), (*C.uchar)(&b[0]), (C.int)(len(b)), &transferred, (C.uint)(timeout))); err != nil {
 		return 0, fmt.Errorf("failed to read from device: %v", err)
 	}
 	return int(transferred), nil
 }
 
-func (dev *libusbDevice) writeBulk(b []byte) (int, error) {
+func (dev *libusbDevice) writeBulk(b []byte, timeout int) (int, error) {
 	var transferred C.int
-	if err := fromLibusbErrno(C.libusb_bulk_transfer(dev.handle, (C.uchar)(*dev.libusbWriter), (*C.uchar)(&b[0]), (C.int)(len(b)), &transferred, (C.uint)(0))); err != nil {
+	if err := fromLibusbErrno(C.libusb_bulk_transfer(dev.handle, (C.uchar)(*dev.libusbWriter), (*C.uchar)(&b[0]), (C.int)(len(b)), &transferred, (C.uint)(timeout))); err != nil {
 		return 0, fmt.Errorf("failed to write to device: %v", err)
 	}
 	return int(transferred), nil
 }
 
-func (dev *libusbDevice) writeInterrupt(b []byte) (int, error) {
+func (dev *libusbDevice) writeInterrupt(b []byte, timeout int) (int, error) {
 	var transferred C.int
-	if err := fromLibusbErrno(C.libusb_interrupt_transfer(dev.handle, (C.uchar)(*dev.libusbWriter), (*C.uchar)(&b[0]), (C.int)(len(b)), &transferred, (C.uint)(0))); err != nil {
+	if err := fromLibusbErrno(C.libusb_interrupt_transfer(dev.handle, (C.uchar)(*dev.libusbWriter), (*C.uchar)(&b[0]), (C.int)(len(b)), &transferred, (C.uint)(timeout))); err != nil {
 		return 0, fmt.Errorf("failed to write to device: %v", err)
 	}
 	return int(transferred), nil

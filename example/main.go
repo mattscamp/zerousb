@@ -14,7 +14,7 @@ const ExampleProductId = zerousb.ID(0xa27e)
 
 func main() {
 	// Enumerate over all connected devices
-	devices, err := zerousb.Find(ExampleVendorId, ExampleProductId)
+	devices, err := zerousb.Find(ExampleVendorId, 0)
 	if err != nil {
 		panic(err)
 	}

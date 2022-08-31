@@ -60,10 +60,10 @@ type Device interface {
 	Close() error
 
 	// Write sends a binary blob to a USB device. Uses interrupt or bulk transfers.
-	Write(b []byte) (int, error)
+	Write(b []byte, timeout int) (int, error)
 
 	// Read retrieves a binary blob from a USB device. Uses interrupt or bulk transfers.
-	Read(b []byte) (int, error)
+	Read(b []byte, timeout int) (int, error)
 }
 
 // Find returns a list of all the USB devices attached to the system and
