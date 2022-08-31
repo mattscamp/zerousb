@@ -48,14 +48,13 @@ func getAllDevices(vendorID ID, productID ID) ([]DeviceInfo, error) {
 
 	// Retrieve all the available USB devices and wrap them in Go
 	var deviceList **C.libusb_device
+	defer C.libusb_free_device_list(deviceList, 1)
 
 	count := C.libusb_get_device_list(C.ctx, &deviceList)
 
 	if count < 0 {
 		return nil, libusbError(count)
 	}
-
-	defer C.libusb_free_device_list(deviceList, 1)
 
 	var devices []*C.libusb_device
 	*(*reflect.SliceHeader)(unsafe.Pointer(&devices)) = reflect.SliceHeader{
