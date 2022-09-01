@@ -16,4 +16,6 @@ import (
 	_ "libusb"
 	_ "libusb/libusb"
 	_ "libusb/libusb/os"
+	_ "libwdi"
+	_ "libwdi/libwdi"
 )
