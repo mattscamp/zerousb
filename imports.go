@@ -11,7 +11,7 @@ package zerousb
 #cgo linux,!android LDFLAGS: -lrt
 #cgo darwin CFLAGS: -DOS_DARWIN -DHAVE_SYS_TIME_H
 #cgo darwin LDFLAGS: -framework CoreFoundation -framework IOKit -lobjc
-#cgo windows CFLAGS: -DOS_WINDOWS -I./libwdi/libwdi
+#cgo windows CFLAGS: -DOS_WINDOWS -I./libwdi/libwdi -DHAVE_STRUCT_TIMESPEC
 #cgo windows LDFLAGS: -lsetupapi
 #cgo freebsd CFLAGS: -DOS_FREEBSD
 #cgo freebsd LDFLAGS: -lusb
@@ -21,7 +21,7 @@ package zerousb
 	#include <poll.h>
 	#include "os/threads_posix.c"
 	#include "os/poll_posix.c"
-#elif defined(OS_WINDOWS)// #include "./libwdi/libwdi/libwdi.h"
+#elif defined(OS_WINDOWS)
 	#include "os/poll_windows.c"
 	#include "os/threads_windows.c"
 #endif
