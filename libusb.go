@@ -38,19 +38,18 @@ type libusbDevice struct {
 // enumerateRawWithRef is the internal device enumerator that retains 1 reference
 // to every matched device so they may selectively be opened on request.
 func getAllDevices(vendorID ID, productID ID) ([]DeviceInfo, error) {
+	var ctx *C.libusb_context
 	// Ensure we have a libusb context to interact through. The enumerate call is
 	// protected by a mutex outside, so it's fine to do the below check and init.
-	if C.ctx == nil {
-		if err := fromLibusbErrno(C.libusb_init((**C.libusb_context)(&C.ctx))); err != nil {
-			return nil, fmt.Errorf("failed to initialize libusb: %v", err)
-		}
+	if err := fromLibusbErrno(C.libusb_init(&ctx)); err != nil {
+		return nil, err
 	}
 
 	// Retrieve all the available USB devices and wrap them in Go
 	var deviceList **C.libusb_device
 	defer C.libusb_free_device_list(deviceList, 1)
 
-	count := C.libusb_get_device_list(C.ctx, &deviceList)
+	count := C.libusb_get_device_list(ctx, &deviceList)
 
 	if count < 0 {
 		return nil, libusbError(count)
@@ -82,7 +81,8 @@ func getAllDevices(vendorID ID, productID ID) ([]DeviceInfo, error) {
 			// Retrieve the all the possible USB configurations of the device
 			var cfg *C.struct_libusb_config_descriptor
 			if err := fromLibusbErrno(C.libusb_get_config_descriptor(dev, C.uint8_t(cfgnum), &cfg)); err != nil {
-				return infos, fmt.Errorf("failed to get device %d config %d: %v", devnum, cfgnum, err)
+				fmt.Printf("failed to get device %d config %d: %v", devnum, cfgnum, err)
+				continue
 			}
 			var ifaces []C.struct_libusb_interface
 			*(*reflect.SliceHeader)(unsafe.Pointer(&ifaces)) = reflect.SliceHeader{
