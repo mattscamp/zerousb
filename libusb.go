@@ -17,7 +17,7 @@ extern void goLibusbLog(const char *s);
 #cgo openbsd CFLAGS: -DOS_OPENBSD -DPLATFORM_POSIX
 #cgo openbsd LDFLAGS: -L/usr/local/lib -lusb-1.0
 #cgo darwin CFLAGS: -DOS_DARWIN -DPLATFORM_POSIX
-#cgo darwin LDFLAGS: -framework CoreFoundation -framework IOKit -lobjc
+#cgo darwin LDFLAGS: -framework CoreFoundation -framework IOKit -framework Security -lobjc
 #cgo windows CFLAGS: -DOS_WINDOWS -DPLATFORM_WINDOWS
 #cgo windows LDFLAGS: -lsetupapi
 
