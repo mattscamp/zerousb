@@ -1586,13 +1586,6 @@ static int winusb_get_device_list(struct libusb_context *ctx, struct discovered_
 			usbi_dbg(ctx, "PRO: %s", dev_id);
 #endif
 
-			// ===== START TREZOR CODE =====
-			if (strstr(dev_id, "HUB") == NULL && strstr(dev_id, HARDCODED_LIBUSB_DEVICE_FILTER) == NULL && pass != HCD_PASS && pass != HUB_PASS) {
-				usbi_warn(ctx, "Device '%s' not satisfying filter, skipping (pass %d)", dev_id, pass);
-				continue;
-			}
-			// ===== END TREZOR CODE =====
-
 			// Set API to use or get additional data from generic pass
 			api = USB_API_UNSUPPORTED;
 			sub_api = SUB_API_NOTSET;
