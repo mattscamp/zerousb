@@ -30,15 +30,6 @@ func (e libusbError) Error() string {
 	return fmt.Sprintf("libusb: %s [code %d]", libusbErrorString[e], e)
 }
 
-// fromLibusbErrno converts a raw libusb Error into a Go type.
-func fromLibusbErrno(Errno C.int) error {
-	err := libusbError(Errno)
-	if err == ErrSuccess {
-		return nil
-	}
-	return err
-}
-
 const (
 	ErrSuccess      libusbError = C.LIBUSB_SUCCESS
 	ErrIO           libusbError = C.LIBUSB_ERROR_IO

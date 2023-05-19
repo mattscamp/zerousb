@@ -12,7 +12,7 @@ Using `go get`, the embedded C library is compiled into the binary format of you
 
 ## Acknowledgements
 
-This library is based on and heavily uses code from the [`usb`](https://github.com/karalabe/usb) package by karalabe.
+This library is based on and heavily uses code from the [`trezord-go`](https://github.com/trezor/trezord-go) package.
 
 Error handling for the `libusb` integration originates from the [`gousb`](https://github.com/google/gousb) library.
 

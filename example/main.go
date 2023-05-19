@@ -4,34 +4,34 @@ package main
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/mattscamp/zerousb"
 )
 
 const ExampleVendorId = zerousb.ID(0x0483)
 const ExampleProductId = zerousb.ID(0xa27e)
+const ExampleReadEndpointAddress = 0x81
+const ExampleWriteEndpointAddress = 0x3
+const ExampleInterfaceAddress = 0x1
+const ExampleConfigAddress = 0x1
 
 func main() {
 	// Enumerate over all connected devices
-	devices, err := zerousb.Find(ExampleVendorId, 0)
+	zerousb, err := zerousb.New(zerousb.Options{
+		InterfaceAddress: ExampleInterfaceAddress,
+		ConfigAddress:    ExampleConfigAddress,
+		EpInAddress:      ExampleReadEndpointAddress,
+		EpOutAddress:     ExampleWriteEndpointAddress,
+	}, true)
 	if err != nil {
 		panic(err)
 	}
-	for i, dvc := range devices {
-		fmt.Printf("DVC #%d\n", i)
-		fmt.Printf("  OS Path:    %s\n", dvc.Path)
-		fmt.Printf("  Vendor ID:  %#04x\n", dvc.VendorID)
-		fmt.Printf("  Product ID: %#04x\n", dvc.ProductID)
-		fmt.Printf("  Interface:  %d\n", dvc.Interface)
-		fmt.Println(strings.Repeat("-", 128))
-	}
-	if len(devices) < 1 {
-		panic("No device found.")
-	}
-	connectedDevice, err := devices[0].Open()
+	device, err := zerousb.Connect(ExampleVendorId, ExampleProductId, false)
 	if err != nil {
 		panic(err)
 	}
-	connectedDevice.Close()
+
+	fmt.Printf("%v\n", device.Details())
+
+	device.Close(false)
 }
