@@ -27,8 +27,8 @@ extern void goLibusbLog(const char *s);
 	#include "os/threads_posix.c"
 	#include "os/events_posix.c"
 #elif defined(OS_WINDOWS)
-	#include "os/poll_windows.c"
 	#include "os/threads_windows.c"
+	#include "os/events_windows.c"
 #endif
 
 #ifdef OS_LINUX
