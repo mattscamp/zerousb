@@ -282,7 +282,7 @@ func (d *ZeroUSBDevice) clearBuffer() {
 	mutex.Unlock()
 }
 
-func (d *ZeroUSBDevice) readWrite(buf []byte, endpoint uint8, mutex sync.Locker) (int, error) {
+func (d *ZeroUSBDevice) readWrite(buf []byte, endpoint uint8, mutex sync.Locker, timeout int) (int, error) {
 	for {
 		closed := (atomic.LoadInt32(&d.closed)) == 1
 		if closed {
@@ -290,7 +290,7 @@ func (d *ZeroUSBDevice) readWrite(buf []byte, endpoint uint8, mutex sync.Locker)
 		}
 
 		mutex.Lock()
-		p, err := BulkTransfer(d.dev, endpoint, buf, 0)
+		p, err := BulkTransfer(d.dev, endpoint, buf, uint(timeout))
 		mutex.Unlock()
 
 		if err != nil {
@@ -325,13 +325,13 @@ func (d *ZeroUSBDevice) Write(buf []byte) (int, error) {
 	if d.options.Debug {
 		fmt.Printf("[zerousb] DEBUG. Write. %+v \n", buf)
 	}
-	return d.readWrite(buf, d.options.EpOutAddress, mutex)
+	return d.readWrite(buf, d.options.EpOutAddress, mutex, 0)
 }
 
-func (d *ZeroUSBDevice) Read(buf []byte) (int, error) {
+func (d *ZeroUSBDevice) Read(buf []byte, timeout int) (int, error) {
 	mutex := &d.readLock
 	if d.options.Debug {
 		fmt.Printf("[zerousb] DEBUG. Read. %+v \n", buf)
 	}
-	return d.readWrite(buf, d.options.EpInAddress, mutex)
+	return d.readWrite(buf, d.options.EpInAddress, mutex, timeout)
 }
