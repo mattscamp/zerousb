@@ -37,7 +37,7 @@ extern void goLibusbLog(const char *s);
 #elif OS_DARWIN
 	#include "os/darwin_usb.c"
 #elif OS_WINDOWS
-	#include "os/windows_nt_common.c"
+	#include "os/windows_common.c"
 	#include "os/windows_usbdk.c"
 	#include "os/windows_winusb.c"
 #elif OS_FREEBSD
