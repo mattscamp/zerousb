@@ -276,7 +276,7 @@ func (d *ZeroUSBDevice) clearBuffer() {
 	var buf [64]byte
 
 	for err == nil {
-		_, err = InterruptTransfer(d.dev, d.options.EpInAddress, buf[:], 50)
+		_, err = BulkTransfer(d.dev, d.options.EpInAddress, buf[:], 50)
 	}
 
 	mutex.Unlock()
@@ -290,7 +290,7 @@ func (d *ZeroUSBDevice) readWrite(buf []byte, endpoint uint8, mutex sync.Locker)
 		}
 
 		mutex.Lock()
-		p, err := InterruptTransfer(d.dev, endpoint, buf, 0)
+		p, err := BulkTransfer(d.dev, endpoint, buf, 0)
 		mutex.Unlock()
 
 		if err != nil {
@@ -323,7 +323,7 @@ func (d *ZeroUSBDevice) Details() *DeviceDescriptor {
 func (d *ZeroUSBDevice) Write(buf []byte) (int, error) {
 	mutex := &d.writeLock
 	if d.options.Debug {
-		fmt.Printf("[zerousb] DEBUG. Write. %+v", buf)
+		fmt.Printf("[zerousb] DEBUG. Write. %+v \n", buf)
 	}
 	return d.readWrite(buf, d.options.EpOutAddress, mutex)
 }
@@ -331,7 +331,7 @@ func (d *ZeroUSBDevice) Write(buf []byte) (int, error) {
 func (d *ZeroUSBDevice) Read(buf []byte) (int, error) {
 	mutex := &d.readLock
 	if d.options.Debug {
-		fmt.Printf("[zerousb] DEBUG. Read. %+v", buf)
+		fmt.Printf("[zerousb] DEBUG. Read. %+v \n", buf)
 	}
 	return d.readWrite(buf, d.options.EpInAddress, mutex)
 }

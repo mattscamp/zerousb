@@ -33,5 +33,12 @@ func main() {
 
 	fmt.Printf("%v\n", device.Details())
 
+	wrote, err := device.Write([]byte{0x30, 0x02})
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("%v\n", wrote)
+
 	device.Close(false)
 }
