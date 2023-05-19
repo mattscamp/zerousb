@@ -32,10 +32,7 @@
 #include <fcntl.h>
 #include <sys/sysctl.h>
 
-#include <mach/clock.h>
-#include <mach/clock_types.h>
-#include <mach/mach_host.h>
-#include <mach/mach_port.h>
+#include <mach/mach_time.h>
 
 /* Suppress warnings about the use of the deprecated objc_registerThreadWithCollector
  * function. Its use is also conditionalized to only older deployment targets. */
@@ -58,20 +55,17 @@ static int init_count = 0;
 static const mach_port_t darwin_default_master_port = 0;
 
 /* async event thread */
+/* if both this mutex and darwin_cached_devices_mutex are to be acquired then
+   darwin_cached_devices_mutex must be acquired first. */
 static pthread_mutex_t libusb_darwin_at_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  libusb_darwin_at_cond = PTHREAD_COND_INITIALIZER;
-
-#if !defined(HAVE_CLOCK_GETTIME)
-static clock_serv_t clock_realtime;
-static clock_serv_t clock_monotonic;
-#endif
 
 #define LIBUSB_DARWIN_STARTUP_FAILURE ((CFRunLoopRef) -1)
 
 static CFRunLoopRef libusb_darwin_acfl = NULL; /* event cf loop */
 static CFRunLoopSourceRef libusb_darwin_acfls = NULL; /* shutdown signal for event cf loop */
 
-static usbi_mutex_t darwin_cached_devices_lock = PTHREAD_MUTEX_INITIALIZER;
+static usbi_mutex_t darwin_cached_devices_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct list_head darwin_cached_devices;
 static const char *darwin_device_class = "IOUSBDevice";
 
@@ -80,6 +74,7 @@ static const char *darwin_device_class = "IOUSBDevice";
 /* async event thread */
 static pthread_t libusb_darwin_at;
 
+static void darwin_exit(struct libusb_context *ctx);
 static int darwin_get_config_descriptor(struct libusb_device *dev, uint8_t config_index, void *buffer, size_t len);
 static int darwin_claim_interface(struct libusb_device_handle *dev_handle, uint8_t iface);
 static int darwin_release_interface(struct libusb_device_handle *dev_handle, uint8_t iface);
@@ -172,7 +167,7 @@ static enum libusb_error darwin_to_libusb (IOReturn result) {
   }
 }
 
-/* this function must be called with the darwin_cached_devices_lock held */
+/* this function must be called with the darwin_cached_devices_mutex held */
 static void darwin_deref_cached_device(struct darwin_cached_device *cached_dev) {
   cached_dev->refcount--;
   /* free the device and remove it from the cache */
@@ -394,7 +389,7 @@ static void darwin_devices_detached (void *ptr, io_iterator_t rem_devices) {
 
     /* we need to match darwin_ref_cached_device call made in darwin_get_cached_device function
        otherwise no cached device will ever get freed */
-    usbi_mutex_lock(&darwin_cached_devices_lock);
+    usbi_mutex_lock(&darwin_cached_devices_mutex);
     list_for_each_entry(old_device, &darwin_cached_devices, list, struct darwin_cached_device) {
       if (old_device->session == session) {
         if (old_device->in_reenumerate) {
@@ -418,7 +413,7 @@ static void darwin_devices_detached (void *ptr, io_iterator_t rem_devices) {
       }
     }
 
-    usbi_mutex_unlock(&darwin_cached_devices_lock);
+    usbi_mutex_unlock(&darwin_cached_devices_mutex);
     if (is_reenumerating) {
       continue;
     }
@@ -466,8 +461,8 @@ static void darwin_fail_startup(void) {
 }
 
 static void *darwin_event_thread_main (void *arg0) {
+  UNUSED(arg0);
   IOReturn kresult;
-  struct libusb_context *ctx = (struct libusb_context *)arg0;
   CFRunLoopRef runloop;
   CFRunLoopSourceRef libusb_shutdown_cfsource;
   CFRunLoopSourceContext libusb_shutdown_cfsourcectx;
@@ -495,7 +490,7 @@ static void *darwin_event_thread_main (void *arg0) {
   io_iterator_t          libusb_add_device_iterator;
 
   /* ctx must only be used for logging during thread startup */
-  usbi_dbg (ctx, "creating hotplug event source");
+  usbi_dbg (NULL, "creating hotplug event source");
 
   runloop = CFRunLoopGetCurrent ();
   CFRetain (runloop);
@@ -519,7 +514,7 @@ static void *darwin_event_thread_main (void *arg0) {
                                               NULL, &libusb_rem_device_iterator);
 
   if (kresult != kIOReturnSuccess) {
-    usbi_err (ctx, "could not add hotplug event source: %s", darwin_error_str (kresult));
+    usbi_err (NULL, "could not add hotplug event source: %s", darwin_error_str (kresult));
     CFRelease (libusb_shutdown_cfsource);
     CFRelease (runloop);
     darwin_fail_startup ();
@@ -532,7 +527,7 @@ static void *darwin_event_thread_main (void *arg0) {
                                               NULL, &libusb_add_device_iterator);
 
   if (kresult != kIOReturnSuccess) {
-    usbi_err (ctx, "could not add hotplug event source: %s", darwin_error_str (kresult));
+    usbi_err (NULL, "could not add hotplug event source: %s", darwin_error_str (kresult));
     CFRelease (libusb_shutdown_cfsource);
     CFRelease (runloop);
     darwin_fail_startup ();
@@ -542,7 +537,7 @@ static void *darwin_event_thread_main (void *arg0) {
   darwin_clear_iterator (libusb_rem_device_iterator);
   darwin_clear_iterator (libusb_add_device_iterator);
 
-  usbi_dbg (ctx, "darwin event thread ready to receive events");
+  usbi_dbg (NULL, "darwin event thread ready to receive events");
 
   /* signal the main thread that the hotplug runloop has been created. */
   pthread_mutex_lock (&libusb_darwin_at_mutex);
@@ -582,73 +577,71 @@ static void *darwin_event_thread_main (void *arg0) {
   pthread_exit (NULL);
 }
 
-/* cleanup function to destroy cached devices */
+/* cleanup function to destroy cached devices. must be called with a lock on darwin_cached_devices_mutex */
 static void darwin_cleanup_devices(void) {
   struct darwin_cached_device *dev, *next;
 
   list_for_each_entry_safe(dev, next, &darwin_cached_devices, list, struct darwin_cached_device) {
+    if (dev->refcount > 1) {
+      usbi_err(NULL, "device still referenced at libusb_exit");
+    }
     darwin_deref_cached_device(dev);
   }
 }
 
+/* must be called with a lock on darwin_cached_devices_mutex */
+static int darwin_first_time_init(void) {
+  if (NULL == darwin_cached_devices.next) {
+    list_init (&darwin_cached_devices);
+  }
+
+  if (!list_empty(&darwin_cached_devices)) {
+    usbi_err(NULL, "libusb_device reference not released on last exit. will not continue");
+    return LIBUSB_ERROR_OTHER;
+  }
+
+  int rc = pthread_create (&libusb_darwin_at, NULL, darwin_event_thread_main, NULL);
+  if (0 != rc) {
+    usbi_err (NULL, "could not create event thread, error %d", rc);
+    return LIBUSB_ERROR_OTHER;
+  }
+
+  pthread_mutex_lock (&libusb_darwin_at_mutex);
+  while (NULL == libusb_darwin_acfl) {
+    pthread_cond_wait (&libusb_darwin_at_cond, &libusb_darwin_at_mutex);
+  }
+
+  if (libusb_darwin_acfl == LIBUSB_DARWIN_STARTUP_FAILURE) {
+    libusb_darwin_acfl = NULL;
+    rc = LIBUSB_ERROR_OTHER;
+  }
+  pthread_mutex_unlock (&libusb_darwin_at_mutex);
+
+  return rc;
+}
+
+static int darwin_init_context(struct libusb_context *ctx) {
+  usbi_mutex_lock(&darwin_cached_devices_mutex);
+
+  bool first_init = (1 == ++init_count);
+
+  if (first_init) {
+    int rc = darwin_first_time_init();
+    if (LIBUSB_SUCCESS != rc) {
+      usbi_mutex_unlock(&darwin_cached_devices_mutex);
+      return rc;
+    }
+  }
+  usbi_mutex_unlock(&darwin_cached_devices_mutex);
+
+  return darwin_scan_devices (ctx);
+}
+
 static int darwin_init(struct libusb_context *ctx) {
-  bool first_init;
-  int rc;
-
-  first_init = (1 == ++init_count);
-
-  do {
-    if (first_init) {
-      if (NULL == darwin_cached_devices.next) {
-        list_init (&darwin_cached_devices);
-      }
-      assert(list_empty(&darwin_cached_devices));
-#if !defined(HAVE_CLOCK_GETTIME)
-      /* create the clocks that will be used if clock_gettime() is not available */
-      host_name_port_t host_self;
-
-      host_self = mach_host_self();
-      host_get_clock_service(host_self, CALENDAR_CLOCK, &clock_realtime);
-      host_get_clock_service(host_self, SYSTEM_CLOCK, &clock_monotonic);
-      mach_port_deallocate(mach_task_self(), host_self);
-#endif
-    }
-
-    rc = darwin_scan_devices (ctx);
-    if (LIBUSB_SUCCESS != rc)
-      break;
-
-    if (first_init) {
-      rc = pthread_create (&libusb_darwin_at, NULL, darwin_event_thread_main, ctx);
-      if (0 != rc) {
-        usbi_err (ctx, "could not create event thread, error %d", rc);
-        rc = LIBUSB_ERROR_OTHER;
-        break;
-      }
-
-      pthread_mutex_lock (&libusb_darwin_at_mutex);
-      while (!libusb_darwin_acfl)
-        pthread_cond_wait (&libusb_darwin_at_cond, &libusb_darwin_at_mutex);
-      if (libusb_darwin_acfl == LIBUSB_DARWIN_STARTUP_FAILURE) {
-        libusb_darwin_acfl = NULL;
-        rc = LIBUSB_ERROR_OTHER;
-      }
-      pthread_mutex_unlock (&libusb_darwin_at_mutex);
-
-      if (0 != rc)
-        pthread_join (libusb_darwin_at, NULL);
-    }
-  } while (0);
-
+  int rc = darwin_init_context(ctx);
   if (LIBUSB_SUCCESS != rc) {
-    if (first_init) {
-      darwin_cleanup_devices ();
-#if !defined(HAVE_CLOCK_GETTIME)
-      mach_port_deallocate(mach_task_self(), clock_realtime);
-      mach_port_deallocate(mach_task_self(), clock_monotonic);
-#endif
-    }
-    --init_count;
+    /* clean up any allocated resources */
+    darwin_exit(ctx);
   }
 
   return rc;
@@ -657,6 +650,7 @@ static int darwin_init(struct libusb_context *ctx) {
 static void darwin_exit (struct libusb_context *ctx) {
   UNUSED(ctx);
 
+  usbi_mutex_lock(&darwin_cached_devices_mutex);
   if (0 == --init_count) {
     /* stop the event runloop and wait for the thread to terminate. */
     pthread_mutex_lock (&libusb_darwin_at_mutex);
@@ -668,12 +662,8 @@ static void darwin_exit (struct libusb_context *ctx) {
     pthread_join (libusb_darwin_at, NULL);
 
     darwin_cleanup_devices ();
-
-#if !defined(HAVE_CLOCK_GETTIME)
-    mach_port_deallocate(mach_task_self(), clock_realtime);
-    mach_port_deallocate(mach_task_self(), clock_monotonic);
-#endif
   }
+  usbi_mutex_unlock(&darwin_cached_devices_mutex);
 }
 
 static int get_configuration_index (struct libusb_device *dev, UInt8 config_value) {
@@ -1018,7 +1008,7 @@ static enum libusb_error darwin_get_cached_device(struct libusb_context *ctx, io
     usbi_dbg(ctx, "parent sessionID: 0x%" PRIx64, parent_sessionID);
   }
 
-  usbi_mutex_lock(&darwin_cached_devices_lock);
+  usbi_mutex_lock(&darwin_cached_devices_mutex);
   do {
     list_for_each_entry(new_device, &darwin_cached_devices, list, struct darwin_cached_device) {
       usbi_dbg(ctx, "matching sessionID/locationID 0x%" PRIx64 "/0x%x against cached device with sessionID/locationID 0x%" PRIx64 "/0x%x",
@@ -1094,7 +1084,7 @@ static enum libusb_error darwin_get_cached_device(struct libusb_context *ctx, io
     }
   } while (0);
 
-  usbi_mutex_unlock(&darwin_cached_devices_lock);
+  usbi_mutex_unlock(&darwin_cached_devices_mutex);
 
   return ret;
 }
@@ -1386,6 +1376,20 @@ static IOReturn darwin_get_interface (usb_device_t **darwin_device, uint8_t ifc,
   return kIOReturnSuccess;
 }
 
+static const struct libusb_interface_descriptor *get_interface_descriptor_by_number(struct libusb_device_handle *dev_handle, struct libusb_config_descriptor *conf_desc, int iface, uint8_t altsetting)
+{
+  int i;
+
+  for (i = 0; i < conf_desc->bNumInterfaces; i++) {
+    if (altsetting < conf_desc->interface[i].num_altsetting && conf_desc->interface[i].altsetting[altsetting].bInterfaceNumber == iface) {
+      return &conf_desc->interface[i].altsetting[altsetting];
+    }
+  }
+
+  usbi_err(HANDLE_CTX(dev_handle), "interface %d with altsetting %d not found for device", iface, (int)altsetting);
+  return NULL;
+}
+
 static enum libusb_error get_endpoints (struct libusb_device_handle *dev_handle, uint8_t iface) {
   struct darwin_device_handle_priv *priv = usbi_get_device_handle_priv(dev_handle);
 
@@ -1427,6 +1431,7 @@ static enum libusb_error get_endpoints (struct libusb_device_handle *dev_handle,
     if (kresult != kIOReturnSuccess) {
       /* probably a buggy device. try to get the endpoint address from the descriptors */
       struct libusb_config_descriptor *config;
+      const struct libusb_interface_descriptor *if_desc;
       const struct libusb_endpoint_descriptor *endpoint_desc;
       UInt8 alt_setting;
 
@@ -1441,13 +1446,16 @@ static enum libusb_error get_endpoints (struct libusb_device_handle *dev_handle,
         return rc;
       }
 
-      if (iface >= config->bNumInterfaces) {
-        usbi_err (HANDLE_CTX (dev_handle), "interface %d out of range for device", iface);
+      if_desc = get_interface_descriptor_by_number (dev_handle, config, iface, alt_setting);
+      if (if_desc == NULL) {
+        libusb_free_config_descriptor (config);
         return LIBUSB_ERROR_NOT_FOUND;
       }
-      endpoint_desc = config->interface[iface].altsetting[alt_setting].endpoint + i - 1;
+
+      endpoint_desc = if_desc->endpoint + i - 1;
 
       cInterface->endpoint_addrs[i - 1] = endpoint_desc->bEndpointAddress;
+      libusb_free_config_descriptor (config);
     } else {
       cInterface->endpoint_addrs[i - 1] = (UInt8)(((kUSBIn == direction) << kUSBRqDirnShift) | (number & LIBUSB_ENDPOINT_ADDRESS_MASK));
     }
@@ -1945,10 +1953,10 @@ static void darwin_destroy_device(struct libusb_device *dev) {
 
   if (dpriv->dev) {
     /* need to hold the lock in case this is the last reference to the device */
-    usbi_mutex_lock(&darwin_cached_devices_lock);
+    usbi_mutex_lock(&darwin_cached_devices_mutex);
     darwin_deref_cached_device (dpriv->dev);
     dpriv->dev = NULL;
-    usbi_mutex_unlock(&darwin_cached_devices_lock);
+    usbi_mutex_unlock(&darwin_cached_devices_mutex);
   }
 }
 
@@ -2270,15 +2278,17 @@ static int darwin_abort_transfers (struct usbi_transfer *itransfer) {
   /* abort transactions */
 #if InterfaceVersion >= 550
   if (LIBUSB_TRANSFER_TYPE_BULK_STREAM == transfer->type)
-    (*(cInterface->interface))->AbortStreamsPipe (cInterface->interface, pipeRef, itransfer->stream_id);
+    kresult = (*(cInterface->interface))->AbortStreamsPipe (cInterface->interface, pipeRef, itransfer->stream_id);
   else
 #endif
-    (*(cInterface->interface))->AbortPipe (cInterface->interface, pipeRef);
+    kresult = (*(cInterface->interface))->AbortPipe (cInterface->interface, pipeRef);
 
-  usbi_dbg (ctx, "calling clear pipe stall to clear the data toggle bit");
-
-  /* newer versions of darwin support clearing additional bits on the device's endpoint */
+#if InterfaceVersion <= 245
+  /* with older releases of IOUSBFamily the OS always clears the host side data toggle. for
+     consistency also clear the data toggle on the device. */
+  usbi_dbg (ctx, "calling ClearPipeStallBothEnds to clear the data toggle bit");
   kresult = (*(cInterface->interface))->ClearPipeStallBothEnds(cInterface->interface, pipeRef);
+#endif
 
   return darwin_to_libusb (kresult);
 }
@@ -2389,27 +2399,36 @@ static int darwin_handle_transfer_completion (struct usbi_transfer *itransfer) {
   return usbi_handle_transfer_completion (itransfer, darwin_transfer_status (itransfer, tpriv->result));
 }
 
-#if !defined(HAVE_CLOCK_GETTIME)
 void usbi_get_monotonic_time(struct timespec *tp) {
-  mach_timespec_t sys_time;
+/* Check if the SDK is new enough to declare clock_gettime(), and the deployment target is at least 10.12. */
+#if ((MAC_OS_X_VERSION_MAX_ALLOWED >= 101200) && (MAC_OS_X_VERSION_MIN_REQUIRED >= 101200))
+  clock_gettime(CLOCK_MONOTONIC, tp);
+#else
+  mach_timebase_info_data_t machTimeBaseInfo;
+  mach_timebase_info(&machTimeBaseInfo);
 
-  /* use system boot time as reference for the monotonic clock */
-  clock_get_time (clock_monotonic, &sys_time);
+  uint64_t uptime = mach_absolute_time();
+  uint64_t uptimeNano = uptime * machTimeBaseInfo.numer / machTimeBaseInfo.denom;
 
-  tp->tv_sec  = sys_time.tv_sec;
-  tp->tv_nsec = sys_time.tv_nsec;
+  uint64_t uptimeSeconds = uptimeNano / NSEC_PER_SEC;
+  uint64_t uptimeNanoRemainder = uptimeNano - (uptimeSeconds * NSEC_PER_SEC);
+
+  tp->tv_sec = uptimeSeconds;
+  tp->tv_nsec = uptimeNanoRemainder;
+#endif
 }
 
 void usbi_get_real_time(struct timespec *tp) {
-  mach_timespec_t sys_time;
-
-  /* CLOCK_REALTIME represents time since the epoch */
-  clock_get_time (clock_realtime, &sys_time);
-
-  tp->tv_sec  = sys_time.tv_sec;
-  tp->tv_nsec = sys_time.tv_nsec;
-}
+/* Check if the SDK is new enough to declare clock_gettime(), and the deployment target is at least 10.12. */
+#if ((MAC_OS_X_VERSION_MAX_ALLOWED >= 101200) && (MAC_OS_X_VERSION_MIN_REQUIRED >= 101200))
+  clock_gettime(CLOCK_REALTIME, tp);
+#else
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  tp->tv_sec = tv.tv_sec;
+  tp->tv_nsec = tv.tv_usec * NSEC_PER_USEC;
 #endif
+}
 
 #if InterfaceVersion >= 550
 static int darwin_alloc_streams (struct libusb_device_handle *dev_handle, uint32_t num_streams, unsigned char *endpoints,
@@ -2504,7 +2523,7 @@ static int darwin_reload_device (struct libusb_device_handle *dev_handle) {
   struct darwin_cached_device *dpriv = DARWIN_CACHED_DEVICE(dev_handle->dev);
   enum libusb_error err;
 
-  usbi_mutex_lock(&darwin_cached_devices_lock);
+  usbi_mutex_lock(&darwin_cached_devices_mutex);
   (*(dpriv->device))->Release(dpriv->device);
   dpriv->device = darwin_device_from_service (HANDLE_CTX (dev_handle), dpriv->service);
   if (!dpriv->device) {
@@ -2512,7 +2531,7 @@ static int darwin_reload_device (struct libusb_device_handle *dev_handle) {
   } else {
     err = LIBUSB_SUCCESS;
   }
-  usbi_mutex_unlock(&darwin_cached_devices_lock);
+  usbi_mutex_unlock(&darwin_cached_devices_mutex);
 
   return err;
 }
