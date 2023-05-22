@@ -151,8 +151,9 @@ func (b *ZeroUSB) claimInterface(d DeviceHandle) (bool, error) {
 			err := DetachKernelDriver(d, usbIfaceNum)
 			if err != nil {
 				fmt.Print("[zerousb] detach of kernel driver failed \n")
-				Close(d)
-				return false, err
+				// Fail softly. This is a newer MacOS feature any may not work everywhere.
+				// Close(d)
+				// return false, err
 			}
 		}
 	}
