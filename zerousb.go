@@ -3,6 +3,7 @@ package zerousb
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 )
@@ -44,7 +45,7 @@ type ZeroUSB struct {
 	options   Options
 }
 
-func New(options Options, detach bool) (*ZeroUSB, error) {
+func New(options Options, _ bool) (*ZeroUSB, error) {
 	var usb Context
 
 	err := Init(&usb)
@@ -55,7 +56,7 @@ func New(options Options, detach bool) (*ZeroUSB, error) {
 	return &ZeroUSB{
 		usb:       usb,
 		options:   options,
-		canDetach: detach,
+		canDetach: runtime.GOOS != "windows",
 	}, nil
 }
 
@@ -142,12 +143,9 @@ func (b *ZeroUSB) claimInterface(d DeviceHandle) (bool, error) {
 	if b.canDetach {
 		kernel, err := KernelDriverActive(d, usbIfaceNum)
 		if err != nil {
-			fmt.Print("[zerousb] detecting kernel driver failed \n")
-			Close(d)
-			return false, err
-		}
-
-		if kernel {
+			// no need to hard fail on this check
+			fmt.Print("[zerousb] detecting kernel driver failed, skipping \n")
+		} else if kernel {
 			attach = true
 			fmt.Print("[zerousb] kernel driver active, detaching \n")
 			err := DetachKernelDriver(d, usbIfaceNum)
