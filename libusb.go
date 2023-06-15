@@ -5,9 +5,9 @@ package zerousb
 
 /*
 extern void goLibusbLog(const char *s);
-define ENABLE_LOGGING 1
-// #define ENABLE_DEBUG_LOGGING 1
-// #define ENUM_DEBUG
+#define ENABLE_LOGGING 1
+#define ENABLE_DEBUG_LOGGING 1
+#define ENUM_DEBUG
 #define DEFAULT_VISIBILITY
 #cgo CFLAGS: -I./libusb/libusb
 #cgo linux CFLAGS: -DOS_LINUX -D_GNU_SOURCE -DPLATFORM_POSIX -DHAVE_CLOCK_GETTIME
