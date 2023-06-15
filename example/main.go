@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/mattscamp/zerousb"
+	"github.com/sirupsen/logrus"
 )
 
 const ExampleVendorId = zerousb.ID(0x0483)
@@ -22,7 +23,7 @@ func main() {
 		ConfigAddress:    ExampleConfigAddress,
 		EpInAddress:      ExampleReadEndpointAddress,
 		EpOutAddress:     ExampleWriteEndpointAddress,
-	}, true)
+	}, logrus.New())
 	if err != nil {
 		panic(err)
 	}
@@ -33,12 +34,22 @@ func main() {
 
 	fmt.Printf("%v\n", device.Details())
 
+	device.ClearBuffer()
+
 	wrote, err := device.Write([]byte{0x30, 0x02})
 	if err != nil {
 		panic(err)
 	}
 
-	fmt.Printf("%v\n", wrote)
+	fmt.Printf("Wrote: %v\n", wrote)
+
+	buf := make([]byte, 32)
+	readRes, err := device.Read(buf, 0)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("Read: %v\n", readRes)
 
 	device.Close(false)
 }

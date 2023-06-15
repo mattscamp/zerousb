@@ -287,7 +287,7 @@ func (d *ZeroUSBDevice) Close(disconnected bool) error {
 
 	if !disconnected {
 		CancelSyncTransfersOnDevice(d.dev)
-		d.clearBuffer()
+		d.ClearBuffer()
 	}
 
 	iface := int(d.options.InterfaceAddress)
@@ -309,7 +309,7 @@ func (d *ZeroUSBDevice) Close(disconnected bool) error {
 	return nil
 }
 
-func (d *ZeroUSBDevice) clearBuffer() {
+func (d *ZeroUSBDevice) ClearBuffer() {
 	mutex := &d.readLock
 
 	mutex.Lock()
@@ -335,7 +335,7 @@ func (d *ZeroUSBDevice) readWrite(buf []byte, endpoint uint8, mutex sync.Locker,
 		mutex.Unlock()
 
 		if err != nil {
-			d.Error(fmt.Sprintf("error seen in r/w: %s. Writing: %s. Endpoint: %d", err.Error(), buf, endpoint))
+			d.Error(fmt.Sprintf("error seen in r/w: %s. Buffer: %b. Endpoint: %v", err.Error(), buf, endpoint))
 
 			if isErrorDisconnect(err) {
 				return 0, ErrDeviceDisconnected
