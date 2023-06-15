@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+
+	"github.com/sirupsen/logrus"
 )
 
 // ErrDeviceClosed is returned for operations where the device closed before or
@@ -43,20 +45,22 @@ type ZeroUSB struct {
 	usb       Context
 	canDetach bool
 	options   Options
+	logger    *logrus.Logger
 }
 
-func New(options Options, _ bool) (*ZeroUSB, error) {
+func New(options Options, logger *logrus.Logger) (*ZeroUSB, error) {
 	var usb Context
 
 	err := Init(&usb)
 	if err != nil {
-		return nil, fmt.Errorf(`[zerousb] error when initializing zerousb. %v \n`, err)
+		return nil, fmt.Errorf(`error when initializing zerousb. %v \n`, err)
 	}
 
 	return &ZeroUSB{
 		usb:       usb,
 		options:   options,
 		canDetach: runtime.GOOS != "windows",
+		logger:    logger,
 	}, nil
 }
 
@@ -84,6 +88,24 @@ func hasIface(dev Device, options Options) (bool, error) {
 	return false, nil
 }
 
+func (b *ZeroUSB) Log(msg string) {
+	if b.logger != nil {
+		b.logger.Info(fmt.Sprintf("[zerousb] %s \n", msg))
+	}
+}
+
+func (b *ZeroUSB) Error(msg string) {
+	if b.logger != nil {
+		b.logger.Error(fmt.Sprintf("[zerousb] %s \n", msg))
+	}
+}
+
+func (b *ZeroUSB) Warn(msg string) {
+	if b.logger != nil {
+		b.logger.Warn(fmt.Sprintf("[zerousb] %s \n", msg))
+	}
+}
+
 func (b *ZeroUSB) Connect(vendorID ID, productID ID, reset bool) (*ZeroUSBDevice, error) {
 	deviceList, err := GetDeviceList(b.usb)
 	if err != nil {
@@ -91,7 +113,7 @@ func (b *ZeroUSB) Connect(vendorID ID, productID ID, reset bool) (*ZeroUSBDevice
 	}
 
 	defer func() {
-		fmt.Print("[zerousb] freeing device list \n")
+		b.Log("freeing device list")
 		FreeDeviceList(deviceList, 1)
 	}()
 
@@ -120,18 +142,18 @@ func (b *ZeroUSB) Connect(vendorID ID, productID ID, reset bool) (*ZeroUSBDevice
 func (b *ZeroUSB) setConfiguration(d DeviceHandle) {
 	currConf, err := GetConfiguration(d)
 	if err != nil {
-		fmt.Printf("[zerousb] current configuration err %s \n", err.Error())
+		b.Error(fmt.Sprintf("current configuration err %s", err.Error()))
 	}
 
 	if currConf != int(b.options.ConfigAddress) {
 		err = SetConfiguration(d, int(b.options.ConfigAddress))
 		if err != nil {
-			fmt.Printf("[zerousb] error at configuration set: %s \n", err.Error())
+			b.Error(fmt.Sprintf("error at configuration set: %s", err.Error()))
 		}
 
 		currConf, err = GetConfiguration(d)
 		if err != nil {
-			fmt.Printf("[zerousb] error at configuration get: %s \n", err.Error())
+			b.Error(fmt.Sprintf("error at configuration get: %s", err.Error()))
 		}
 	}
 }
@@ -144,13 +166,13 @@ func (b *ZeroUSB) claimInterface(d DeviceHandle) (bool, error) {
 		kernel, err := KernelDriverActive(d, usbIfaceNum)
 		if err != nil {
 			// no need to hard fail on this check
-			fmt.Print("[zerousb] detecting kernel driver failed, skipping \n")
+			b.Log(fmt.Sprint("detecting kernel driver failed, skipping"))
 		} else if kernel {
 			attach = true
-			fmt.Print("[zerousb] kernel driver active, detaching \n")
+			b.Log(fmt.Sprint("kernel driver active, detaching"))
 			err := DetachKernelDriver(d, usbIfaceNum)
 			if err != nil {
-				fmt.Print("[zerousb] detach of kernel driver failed \n")
+				b.Error(fmt.Sprint("detach of kernel driver failed"))
 				// Fail softly. This is a newer MacOS feature any may not work everywhere.
 				// Close(d)
 				// return false, err
@@ -160,7 +182,7 @@ func (b *ZeroUSB) claimInterface(d DeviceHandle) (bool, error) {
 
 	err := ClaimInterface(d, usbIfaceNum)
 	if err != nil {
-		fmt.Print("[zerousb] claiming interface failed \n")
+		b.Error(fmt.Sprint("claiming interface failed"))
 		Close(d)
 		return false, err
 	}
@@ -176,7 +198,7 @@ func (b *ZeroUSB) connect(dev Device, reset bool, desc *DeviceDescriptor) (*Zero
 	if reset {
 		err = ResetDevice(d)
 		if err != nil {
-			fmt.Printf("[zerousb] warning at device reset: %s \n", err)
+			b.Warn(fmt.Sprintf("warning at device reset: %s", err))
 		}
 	}
 
@@ -192,6 +214,7 @@ func (b *ZeroUSB) connect(dev Device, reset bool, desc *DeviceDescriptor) (*Zero
 		closed:  0,
 		attach:  attach,
 		options: b.options,
+		logger:  b.logger,
 		desc:    desc,
 	}, nil
 }
@@ -199,7 +222,7 @@ func (b *ZeroUSB) connect(dev Device, reset bool, desc *DeviceDescriptor) (*Zero
 func (b *ZeroUSB) isMatch(dev Device, vendorID ID, productID ID) (bool, *DeviceDescriptor) {
 	desc, err := GetDeviceDescriptor(dev)
 	if err != nil {
-		fmt.Printf("[zerousb] error getting device descriptor %v \n", err.Error())
+		b.Error(fmt.Sprintf("error getting device descriptor %v", err.Error()))
 		return false, nil
 	}
 
@@ -216,7 +239,7 @@ func (b *ZeroUSB) isMatch(dev Device, vendorID ID, productID ID) (bool, *DeviceD
 
 	conf, err := GetActiveConfigDescriptor(dev)
 	if err != nil {
-		fmt.Printf("[zerousb] error getting config descriptor %v \n", err.Error())
+		b.Error(fmt.Sprintf("error getting config descriptor %v", err.Error()))
 		return false, nil
 	}
 
@@ -233,11 +256,30 @@ func (b *ZeroUSB) isMatch(dev Device, vendorID ID, productID ID) (bool, *DeviceD
 type ZeroUSBDevice struct {
 	dev       DeviceHandle
 	options   Options
+	logger    *logrus.Logger
 	closed    int32 // atomic
 	readLock  sync.Mutex
 	writeLock sync.Mutex
 	attach    bool
 	desc      *DeviceDescriptor
+}
+
+func (b *ZeroUSBDevice) Log(msg string) {
+	if b.logger != nil {
+		b.logger.Info(fmt.Sprintf("[zerousb] %s \n", msg))
+	}
+}
+
+func (b *ZeroUSBDevice) Error(msg string) {
+	if b.logger != nil {
+		b.logger.Error(fmt.Sprintf("[zerousb] %s \n", msg))
+	}
+}
+
+func (b *ZeroUSBDevice) Warn(msg string) {
+	if b.logger != nil {
+		b.logger.Warn(fmt.Sprintf("[zerousb] %s \n", msg))
+	}
 }
 
 func (d *ZeroUSBDevice) Close(disconnected bool) error {
@@ -251,14 +293,14 @@ func (d *ZeroUSBDevice) Close(disconnected bool) error {
 	iface := int(d.options.InterfaceAddress)
 	err := ReleaseInterface(d.dev, iface)
 	if err != nil {
-		fmt.Printf("[zerusb]: error at releasing interface: %s", err)
+		d.Error(fmt.Sprintf("error at releasing interface: %s", err))
 	}
 
 	if d.attach {
 		err = AttachKernelDriver(d.dev, iface)
 		if err != nil {
 			// do not throw error, it is just re-attach anyway
-			fmt.Printf("[zerusb]: error re-attaching driver: %s", err)
+			d.Error(fmt.Sprintf("error re-attaching driver: %s", err))
 		}
 	}
 
@@ -293,7 +335,7 @@ func (d *ZeroUSBDevice) readWrite(buf []byte, endpoint uint8, mutex sync.Locker,
 		mutex.Unlock()
 
 		if err != nil {
-			fmt.Sprintf("[zerousb] error seen in r/w: %s", err.Error())
+			d.Error(fmt.Sprintf("error seen in r/w: %s", err.Error()))
 
 			if isErrorDisconnect(err) {
 				return 0, ErrDeviceDisconnected
@@ -322,7 +364,7 @@ func (d *ZeroUSBDevice) Details() *DeviceDescriptor {
 func (d *ZeroUSBDevice) Write(buf []byte) (int, error) {
 	mutex := &d.writeLock
 	if d.options.Debug {
-		fmt.Printf("[zerousb] DEBUG. Write. %+v \n", buf)
+		d.Log(fmt.Sprintf("DEBUG. Write. %+v \n", buf))
 	}
 	return d.readWrite(buf, d.options.EpOutAddress, mutex, 0)
 }
@@ -330,7 +372,7 @@ func (d *ZeroUSBDevice) Write(buf []byte) (int, error) {
 func (d *ZeroUSBDevice) Read(buf []byte, timeout int) (int, error) {
 	mutex := &d.readLock
 	if d.options.Debug {
-		fmt.Printf("[zerousb] DEBUG. Read. %+v \n", buf)
+		d.Log(fmt.Sprintf("DEBUG. Read. %+v \n", buf))
 	}
 	return d.readWrite(buf, d.options.EpInAddress, mutex, timeout)
 }
