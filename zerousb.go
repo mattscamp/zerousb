@@ -304,16 +304,11 @@ func (d *ZeroUSBDevice) Close(disconnected bool) error {
 }
 
 func (d *ZeroUSBDevice) ClearBuffer() {
-	mutex := &d.lock
-
-	mutex.Lock()
-	defer mutex.Unlock()
-
 	var err error
 	var buf [64]byte
 
 	for err == nil {
-		_, err = BulkTransfer(d.dev, d.options.EpInAddress, buf[:], 50)
+		_, err = d.Read(buf[:], 50)
 	}
 }
 
