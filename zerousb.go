@@ -37,7 +37,9 @@ type Options struct {
 	InterfaceAddress uint8
 	ConfigAddress    uint8
 	EpInAddress      uint8
+	EpInType         uint8
 	EpOutAddress     uint8
+	EpOutType        uint8
 	Debug            bool
 }
 
@@ -66,26 +68,6 @@ func New(options Options, logger *logrus.Logger) (*ZeroUSB, error) {
 
 func (b *ZeroUSB) Close() {
 	Exit(b.usb)
-}
-
-func hasIface(dev Device, options Options) (bool, error) {
-	config, err := GetConfigDescriptor(dev, usbConfigIndex)
-	if err != nil {
-		return false, err
-	}
-	defer FreeConfigDescriptor(config)
-
-	ifaces := config.Interface
-	for _, iface := range ifaces {
-		for _, alt := range iface.Altsetting {
-			if alt.BNumEndpoints == 2 &&
-				(alt.Endpoint[0].BEndpointAddress == options.EpInAddress || alt.Endpoint[1].BEndpointAddress == options.EpInAddress) &&
-				(alt.Endpoint[0].BEndpointAddress == options.EpOutAddress || alt.Endpoint[1].BEndpointAddress == options.EpOutAddress) {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
 }
 
 func (b *ZeroUSB) Log(msg string) {
@@ -120,10 +102,11 @@ func (b *ZeroUSB) Connect(vendorID ID, productID ID, reset bool) (*ZeroUSBDevice
 	devices := make([]Device, 0)
 	descs := make([]*DeviceDescriptor, 0)
 	for _, dev := range deviceList {
-		match, desc := b.isMatch(dev, vendorID, productID)
-		if match {
+		matchingDescriptor := b.isMatch(dev, vendorID, productID)
+		if matchingDescriptor != nil {
 			devices = append(devices, dev)
-			descs = append(descs, desc)
+			descs = append(descs, matchingDescriptor)
+			break
 		}
 	}
 
@@ -158,25 +141,14 @@ func (b *ZeroUSB) setConfiguration(d DeviceHandle) {
 	}
 }
 
-func (b *ZeroUSB) claimInterface(d DeviceHandle) (bool, error) {
-	attach := false
+func (b *ZeroUSB) claimInterface(d DeviceHandle) error {
 	usbIfaceNum := int(b.options.InterfaceAddress)
 
 	if b.canDetach {
-		kernel, err := KernelDriverActive(d, usbIfaceNum)
+		err := DetachKernelDriver(d, usbIfaceNum)
 		if err != nil {
-			// no need to hard fail on this check
-			b.Log(fmt.Sprint("detecting kernel driver failed, skipping"))
-		} else if kernel {
-			attach = true
-			b.Log(fmt.Sprint("kernel driver active, detaching"))
-			err := DetachKernelDriver(d, usbIfaceNum)
-			if err != nil {
-				b.Error(fmt.Sprint("detach of kernel driver failed"))
-				// Fail softly. This is a newer MacOS feature any may not work everywhere.
-				// Close(d)
-				// return false, err
-			}
+			b.Warn(fmt.Sprint("detach of kernel driver failed"))
+			// Fail softly. This is a newer MacOS feature any may not work everywhere.
 		}
 	}
 
@@ -184,9 +156,9 @@ func (b *ZeroUSB) claimInterface(d DeviceHandle) (bool, error) {
 	if err != nil {
 		b.Error(fmt.Sprint("claiming interface failed"))
 		Close(d)
-		return false, err
+		return err
 	}
-	return attach, nil
+	return nil
 }
 
 func (b *ZeroUSB) connect(dev Device, reset bool, desc *DeviceDescriptor) (*ZeroUSBDevice, error) {
@@ -202,9 +174,7 @@ func (b *ZeroUSB) connect(dev Device, reset bool, desc *DeviceDescriptor) (*Zero
 		}
 	}
 
-	b.setConfiguration(d)
-
-	attach, err := b.claimInterface(d)
+	err = b.claimInterface(d)
 	if err != nil {
 		return nil, err
 	}
@@ -212,56 +182,88 @@ func (b *ZeroUSB) connect(dev Device, reset bool, desc *DeviceDescriptor) (*Zero
 	return &ZeroUSBDevice{
 		dev:     d,
 		closed:  0,
-		attach:  attach,
 		options: b.options,
 		logger:  b.logger,
 		desc:    desc,
 	}, nil
 }
 
-func (b *ZeroUSB) isMatch(dev Device, vendorID ID, productID ID) (bool, *DeviceDescriptor) {
+func (b *ZeroUSB) isMatch(dev Device, vendorID ID, productID ID) *DeviceDescriptor {
 	desc, err := GetDeviceDescriptor(dev)
 	if err != nil {
 		b.Error(fmt.Sprintf("error getting device descriptor %v", err.Error()))
-		return false, nil
+		return nil
 	}
 
 	// Skip HID devices, they are handled directly by OS libraries
 	if desc.BDeviceClass == CLASS_HID {
-		return false, nil
+		return nil
 	}
 
 	vid := desc.IDVendor
 	pid := desc.IDProduct
 	if vid != vendorID || pid != productID {
-		return false, nil
+		return nil
 	}
 
-	conf, err := GetActiveConfigDescriptor(dev)
-	if err != nil {
-		b.Error(fmt.Sprintf("error getting config descriptor %v", err.Error()))
-		return false, nil
+	var matchingDescriptor *DeviceDescriptor
+	// Iterate over all the configurations and find raw interfaces
+	for cfgnum := 0; cfgnum < int(desc.BNumConfigurations); cfgnum++ {
+		// Retrieve the all the possible USB configurations of the device
+		conf, err := GetConfigDescriptor(dev, uint8(cfgnum))
+		if err != nil {
+			b.Error(fmt.Sprintf("error getting config descriptor %v", err.Error()))
+			continue
+		}
+		defer FreeConfigDescriptor(conf)
+
+		// Drill down into each advertised interface
+		for _, iface := range conf.Interface {
+			if iface.NumAltsetting == 0 {
+				continue
+			}
+			for _, alt := range iface.Altsetting {
+				// Skip HID interfaces, they are handled directly by OS libraries
+				if alt.BInterfaceClass == CLASS_HID {
+					continue
+				}
+
+				// Find the endpoints that can speak libusb bulk or interrupt
+				for _, end := range alt.Endpoint {
+					// Skip any non-interrupt and bulk endpoints
+					if end.BmAttributes != TRANSFER_TYPE_INTERRUPT && end.BmAttributes != TRANSFER_TYPE_BULK {
+						continue
+					}
+					if end.BEndpointAddress&ENDPOINT_IN == ENDPOINT_IN {
+						b.options.EpInAddress = end.BEndpointAddress
+						b.options.EpInType = end.BmAttributes
+					} else {
+						b.options.EpOutAddress = end.BEndpointAddress
+						b.options.EpOutType = end.BmAttributes
+					}
+				}
+				// If both in and out interrupts are available, match the device
+				if b.options.EpInAddress != 0 && b.options.EpOutAddress != 0 {
+					// Enumeration matched, bump the device refcount to avoid cleaning it up
+					matchingDescriptor = desc
+					b.options.InterfaceAddress = alt.BInterfaceNumber
+					break
+				}
+			}
+		}
 	}
 
-	defer FreeConfigDescriptor(conf)
-
-	exists, err := hasIface(dev, b.options)
-	if err != nil {
-		return false, nil
-	}
-
-	return exists, desc
+	return matchingDescriptor
 }
 
 type ZeroUSBDevice struct {
-	dev       DeviceHandle
-	options   Options
-	logger    *logrus.Logger
-	closed    int32 // atomic
-	readLock  sync.Mutex
-	writeLock sync.Mutex
-	attach    bool
-	desc      *DeviceDescriptor
+	dev     DeviceHandle
+	options Options
+	logger  *logrus.Logger
+	closed  int32 // atomic
+	lock    sync.Mutex
+	attach  bool
+	desc    *DeviceDescriptor
 }
 
 func (b *ZeroUSBDevice) Log(msg string) {
@@ -296,58 +298,59 @@ func (d *ZeroUSBDevice) Close(disconnected bool) error {
 		d.Error(fmt.Sprintf("error at releasing interface: %s", err))
 	}
 
-	if d.attach {
-		err = AttachKernelDriver(d.dev, iface)
-		if err != nil {
-			// do not throw error, it is just re-attach anyway
-			d.Error(fmt.Sprintf("error re-attaching driver: %s", err))
-		}
-	}
-
 	Close(d.dev)
 
 	return nil
 }
 
 func (d *ZeroUSBDevice) ClearBuffer() {
-	mutex := &d.readLock
+	mutex := &d.lock
 
 	mutex.Lock()
+	defer mutex.Unlock()
+
 	var err error
 	var buf [64]byte
 
 	for err == nil {
 		_, err = BulkTransfer(d.dev, d.options.EpInAddress, buf[:], 50)
 	}
-
-	mutex.Unlock()
 }
 
 func (d *ZeroUSBDevice) readWrite(buf []byte, endpoint uint8, mutex sync.Locker, timeout int) (int, error) {
-	for {
-		closed := (atomic.LoadInt32(&d.closed)) == 1
-		if closed {
-			return 0, ErrDeviceClosed
-		}
+	mutex.Lock()
+	defer mutex.Unlock()
 
-		mutex.Lock()
-		p, err := BulkTransfer(d.dev, endpoint, buf, uint(timeout))
-		mutex.Unlock()
+	var p []byte
+	var err error
 
-		if err != nil {
-			d.Error(fmt.Sprintf("error seen in r/w: %s. Buffer: %b. Endpoint: %v", err.Error(), buf, endpoint))
-
-			if isErrorDisconnect(err) {
-				return 0, ErrDeviceDisconnected
-			}
-
-			return 0, err
-		}
-
-		if len(p) > 0 {
-			return len(p), err
-		}
+	if d.options.EpInAddress == endpoint && d.options.EpInType == TRANSFER_TYPE_BULK {
+		p, err = BulkTransfer(d.dev, endpoint, buf, uint(timeout))
 	}
+
+	if d.options.EpInAddress == endpoint && d.options.EpInType == TRANSFER_TYPE_INTERRUPT {
+		p, err = InterruptTransfer(d.dev, endpoint, buf, uint(timeout))
+	}
+
+	if d.options.EpOutAddress == endpoint && d.options.EpOutType == TRANSFER_TYPE_BULK {
+		p, err = BulkTransfer(d.dev, endpoint, buf, uint(timeout))
+	}
+
+	if d.options.EpOutAddress == endpoint && d.options.EpOutType == TRANSFER_TYPE_INTERRUPT {
+		p, err = InterruptTransfer(d.dev, endpoint, buf, uint(timeout))
+	}
+
+	if err != nil {
+		d.Error(fmt.Sprintf("error seen in r/w: %s. Buffer: %b. Endpoint: %v. Res: %+v", err.Error(), buf, endpoint, len(p)))
+
+		if isErrorDisconnect(err) {
+			return 0, ErrDeviceDisconnected
+		}
+
+		return 0, err
+	}
+
+	return len(p), err
 }
 
 func isErrorDisconnect(err error) bool {
@@ -362,17 +365,19 @@ func (d *ZeroUSBDevice) Details() *DeviceDescriptor {
 }
 
 func (d *ZeroUSBDevice) Write(buf []byte) (int, error) {
-	mutex := &d.writeLock
 	if d.options.Debug {
 		d.Log(fmt.Sprintf("DEBUG. Write. %+v \n", buf))
 	}
-	return d.readWrite(buf, d.options.EpOutAddress, mutex, 0)
+	return d.readWrite(buf, d.options.EpOutAddress, &d.lock, 0)
 }
 
 func (d *ZeroUSBDevice) Read(buf []byte, timeout int) (int, error) {
-	mutex := &d.readLock
 	if d.options.Debug {
 		d.Log(fmt.Sprintf("DEBUG. Read. %+v \n", buf))
 	}
-	return d.readWrite(buf, d.options.EpInAddress, mutex, timeout)
+	// default read timeout
+	if timeout == 0 {
+		timeout = 5000
+	}
+	return d.readWrite(buf, d.options.EpInAddress, &d.lock, timeout)
 }

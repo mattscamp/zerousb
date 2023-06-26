@@ -18,12 +18,7 @@ const ExampleConfigAddress = 0x1
 
 func main() {
 	// Enumerate over all connected devices
-	zerousb, err := zerousb.New(zerousb.Options{
-		InterfaceAddress: ExampleInterfaceAddress,
-		ConfigAddress:    ExampleConfigAddress,
-		EpInAddress:      ExampleReadEndpointAddress,
-		EpOutAddress:     ExampleWriteEndpointAddress,
-	}, logrus.New())
+	zerousb, err := zerousb.New(zerousb.Options{}, logrus.New())
 	if err != nil {
 		panic(err)
 	}
@@ -34,15 +29,12 @@ func main() {
 
 	fmt.Printf("%v\n", device.Details())
 
-	device.ClearBuffer()
-
 	wrote, err := device.Write([]byte{0x30, 0x02})
 	if err != nil {
 		panic(err)
 	}
 
 	fmt.Printf("Wrote: %v\n", wrote)
-
 	buf := make([]byte, 32)
 	readRes, err := device.Read(buf, 0)
 	if err != nil {
