@@ -288,7 +288,6 @@ func (d *ZeroUSBDevice) Close(disconnected bool) error {
 	atomic.StoreInt32(&d.closed, 1)
 
 	if !disconnected {
-		CancelSyncTransfersOnDevice(d.dev)
 		d.ClearBuffer()
 	}
 

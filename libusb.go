@@ -5,7 +5,7 @@ package zerousb
 
 /*
 extern void goLibusbLog(const char *s);
-#define ENABLE_LOGGING 1
+# define ENABLE_LOGGING 1
 // #define ENABLE_DEBUG_LOGGING 1
 // #define ENUM_DEBUG
 #define DEFAULT_VISIBILITY
@@ -1399,10 +1399,3 @@ func InterruptTransfer(hdl DeviceHandle, endpoint uint8, data []byte, timeout ui
 	}
 	return data[:int(transferred)], nil
 }
-
-// libusb_cancel_sync_transfers_on_device(struct libusb_device_handle *dev_handle) {
-func CancelSyncTransfersOnDevice(hdl DeviceHandle) {
-	C.libusb_cancel_sync_transfers_on_device(hdl)
-}
-
-//-----------------------------------------------------------------------------
