@@ -21,20 +21,21 @@ func main() {
 	// Enumerate over all connected devices
 	zerousb, err := zerousb.New(zerousb.Options{
 		InterfaceAddress: ExampleInterfaceAddress,
+		EpInAddress:      ExampleReadEndpointAddress,
+		EpOutAddress:     ExampleWriteEndpointAddress,
+		EpInType:         zerousb.TRANSFER_TYPE_BULK,
+		EpOutType:        zerousb.TRANSFER_TYPE_BULK,
 	}, logrus.New())
 	if err != nil {
 		panic(err)
 	}
+
 	device, err := zerousb.Connect(ExampleVendorId, ExampleProductId, false)
 	if err != nil {
 		panic(err)
 	}
 
-	details, _ := device.Details()
-	fmt.Printf("Found Vendor ID %v and Product ID %v\n",
-		details.ProductID,
-		details.VendorID,
-	)
+	fmt.Printf("%v\n", device.Details())
 
 	wrote, err := device.Write([]byte{0x30, 0x02})
 	if err != nil {
