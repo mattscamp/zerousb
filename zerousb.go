@@ -219,12 +219,11 @@ func (d *ZeroUSBDevice) readWrite(buf []byte, endpoint byte, mutex sync.Locker, 
 	}
 
 	if err != nil {
-		if !ignoreErrors {
-			d.Error(fmt.Sprintf("error seen in r/w: %s. Buffer: %b. Endpoint: %v. Res: %+v", err.Error(), buf, endpoint, len(p)))
-		}
-
 		if isErrorDisconnect(err) {
 			return 0, ErrDeviceDisconnected
+		} else if !ignoreErrors {
+			d.Error(fmt.Sprintf("error seen in r/w: %s. Buffer: %b. Endpoint: %v. Res: %+v", err.Error(), buf, endpoint, len(p)))
+			ResetDevice(*d.handle)
 		}
 
 		return 0, err
