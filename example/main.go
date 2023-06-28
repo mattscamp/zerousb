@@ -14,11 +14,14 @@ const ExampleProductId = zerousb.ID(0xa27e)
 const ExampleReadEndpointAddress = 0x81
 const ExampleWriteEndpointAddress = 0x3
 const ExampleInterfaceAddress = 0x1
-const ExampleConfigAddress = 0x1
+
+var ExampleConfigAddress = uint8(0x1)
 
 func main() {
 	// Enumerate over all connected devices
-	zerousb, err := zerousb.New(zerousb.Options{}, logrus.New())
+	zerousb, err := zerousb.New(zerousb.Options{
+		InterfaceAddress: ExampleInterfaceAddress,
+	}, logrus.New())
 	if err != nil {
 		panic(err)
 	}
@@ -27,7 +30,11 @@ func main() {
 		panic(err)
 	}
 
-	fmt.Printf("%v\n", device.Details())
+	details, _ := device.Details()
+	fmt.Printf("Found Vendor ID %v and Product ID %v\n",
+		details.ProductID,
+		details.VendorID,
+	)
 
 	wrote, err := device.Write([]byte{0x30, 0x02})
 	if err != nil {
