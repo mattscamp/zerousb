@@ -33,6 +33,13 @@
 #include "libusbi.h"
 #include "windows_winusb.h"
 
+
+// ===== START TREZOR CODE =====
+#if defined(interface)
+#undef interface
+#endif
+// ===== END TREZOR CODE =====
+
 #define HANDLE_VALID(h) (((h) != NULL) && ((h) != INVALID_HANDLE_VALUE))
 
 // The below macro is used in conjunction with safe loops.
@@ -488,7 +495,7 @@ static int get_interface_by_endpoint(struct libusb_config_descriptor *conf_desc,
 /*
  * Open a device and associate the HANDLE with the context's I/O completion port
  */
-static HANDLE windows_open(struct libusb_device_handle *dev_handle, const char *path, DWORD access)
+static HANDLE _windows_open(struct libusb_device_handle *dev_handle, const char *path, DWORD access)
 {
 	struct libusb_context *ctx = HANDLE_CTX(dev_handle);
 	struct windows_context_priv *priv = usbi_get_context_priv(ctx);
@@ -1359,6 +1366,12 @@ static int set_composite_interface(struct libusb_context *ctx, struct libusb_dev
 	int interface_number;
 	const char *mi_str;
 
+	// ===== START TREZOR CODE =====
+	if (api == USB_API_WINUSBX) {
+		dev->has_winusb_driver = 1;
+	}
+	// ===== END TREZOR CODE =====
+
 	// Because MI_## are not necessarily in sequential order (some composite
 	// devices will have only MI_00 & MI_03 for instance), we retrieve the actual
 	// interface number from the path's MI value
@@ -1788,6 +1801,10 @@ static int winusb_get_device_list(struct libusb_context *ctx, struct discovered_
 					if (priv->hid == NULL)
 						LOOP_BREAK(LIBUSB_ERROR_NO_MEM);
 					break;
+				// ===== START TREZOR CODE =====
+				case USB_API_WINUSBX:
+					dev->has_winusb_driver = 1;
+				// ===== END TREZOR CODE =====
 				default:
 					// For other devices, the first interface is the same as the device
 					priv->usb_interface[0].path = _strdup(priv->path);
@@ -2438,7 +2455,7 @@ static int winusbx_open(int sub_api, struct libusb_device_handle *dev_handle)
 	for (i = 0; i < USB_MAXINTERFACES; i++) {
 		if ((priv->usb_interface[i].path != NULL)
 				&& (priv->usb_interface[i].apib->id == USB_API_WINUSBX)) {
-			file_handle = windows_open(dev_handle, priv->usb_interface[i].path, GENERIC_READ | GENERIC_WRITE);
+			file_handle = _windows_open(dev_handle, priv->usb_interface[i].path, GENERIC_READ | GENERIC_WRITE);
 			if (file_handle == INVALID_HANDLE_VALUE) {
 				usbi_err(HANDLE_CTX(dev_handle), "could not open device %s (interface %d): %s", priv->usb_interface[i].path, i, windows_error_str(0));
 				switch (GetLastError()) {
@@ -2611,7 +2628,7 @@ static int winusbx_claim_interface(int sub_api, struct libusb_device_handle *dev
 					*dev_interface_path_guid_start = '\0';
 
 					if (strncmp(dev_interface_path, priv->usb_interface[iface].path, strlen(dev_interface_path)) == 0) {
-						file_handle = windows_open(dev_handle, filter_path, GENERIC_READ | GENERIC_WRITE);
+						file_handle = _windows_open(dev_handle, filter_path, GENERIC_READ | GENERIC_WRITE);
 						if (file_handle != INVALID_HANDLE_VALUE) {
 							if (WinUSBX[sub_api].Initialize(file_handle, &winusb_handle)) {
 								// Replace the existing file handle with the working one
@@ -3780,7 +3797,7 @@ static int hid_open(int sub_api, struct libusb_device_handle *dev_handle)
 	for (i = 0; i < USB_MAXINTERFACES; i++) {
 		if ((priv->usb_interface[i].path != NULL)
 				&& (priv->usb_interface[i].apib->id == USB_API_HID)) {
-			hid_handle = windows_open(dev_handle, priv->usb_interface[i].path, GENERIC_READ | GENERIC_WRITE);
+			hid_handle = _windows_open(dev_handle, priv->usb_interface[i].path, GENERIC_READ | GENERIC_WRITE);
 			/*
 			 * http://www.lvr.com/hidfaq.htm: Why do I receive "Access denied" when attempting to access my HID?
 			 * "Windows 2000 and later have exclusive read/write access to HIDs that are configured as a system
@@ -3790,7 +3807,7 @@ static int hid_open(int sub_api, struct libusb_device_handle *dev_handle)
 			 */
 			if (hid_handle == INVALID_HANDLE_VALUE) {
 				usbi_warn(HANDLE_CTX(dev_handle), "could not open HID device in R/W mode (keyboard or mouse?) - trying without");
-				hid_handle = windows_open(dev_handle, priv->usb_interface[i].path, 0);
+				hid_handle = _windows_open(dev_handle, priv->usb_interface[i].path, 0);
 				if (hid_handle == INVALID_HANDLE_VALUE) {
 					usbi_err(HANDLE_CTX(dev_handle), "could not open device %s (interface %d): %s", priv->path, i, windows_error_str(0));
 					switch (GetLastError()) {

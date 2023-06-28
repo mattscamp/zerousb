@@ -535,6 +535,16 @@ int API_EXPORTED libusb_get_device_descriptor(libusb_device *dev,
 	static_assert(sizeof(dev->device_descriptor) == LIBUSB_DT_DEVICE_SIZE,
 		      "struct libusb_device_descriptor is not expected size");
 	*desc = dev->device_descriptor;
+	// ===== START TREZOR CODE =====
+	#ifdef OS_WINDOWS
+	// hack for filtering out non-WinUSB devices in trezord
+	// (note that in trezord layer, throwing error here does NOT throw error up the chain,
+	//  it just ignores the device)
+	if (!dev->has_winusb_driver) {
+		return LIBUSB_ERROR_OTHER;
+	}
+	#endif
+	// ===== END TREZOR CODE =====
 	return 0;
 }
 
