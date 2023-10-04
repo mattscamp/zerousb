@@ -176,6 +176,14 @@ func open(info DeviceInfo) (*libusbDevice, error) {
 		// Keep the matching device reference, release anything else
 		if device == nil && *match.libusbPort == *info.libusbPort && match.Interface == info.Interface {
 			device = match.libusbDevice.(*C.libusb_device)
+		} else {
+			fmt.Printf(
+				"Found matching device, but port or interface mismatch. Port Actual: %d - Expected %d. Iface Actual: %d - Expected %d.",
+				*match.libusbPort,
+				*info.libusbPort,
+				match.Interface,
+				info.Interface,
+			)
 		}
 	}
 
