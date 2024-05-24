@@ -5,7 +5,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/mattscamp/zerousb.v2"
+	"github.com/mattscamp/zerousb/v2"
 	"github.com/sirupsen/logrus"
 )
 
