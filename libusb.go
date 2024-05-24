@@ -1,6 +1,9 @@
 //go:build (linux && cgo) || (freebsd && cgo) || (darwin && !ios && cgo) || (windows && cgo) || (openbsd && cgo)
 // +build linux,cgo freebsd,cgo darwin,!ios,cgo windows,cgo openbsd,cgo
 
+// A large chunk of this code has been imported from https://github.com/gotmc/libusb and modified.
+// LICENSE: https://github.com/gotmc/libusb/blob/master/LICENSE.txt
+
 package zerousb
 
 /*
@@ -55,1364 +58,1013 @@ extern void goLibusbLog(const char *s);
 	#include "sync.c"
 #endif
 
-
-static uint8_t *dev_capability_data_ptr(struct libusb_bos_dev_capability_descriptor *x) {
-  return &x->dev_capability_data[0];
-}
-static struct libusb_bos_dev_capability_descriptor **dev_capability_ptr(struct libusb_bos_descriptor *x) {
-  return &x->dev_capability[0];
-}
 */
+// int set_debug(libusb_context * ctx, int level) {
+// #if HAVE_LIBUSB_SET_OPTION
+//    return libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, level);
+// #else
+//    libusb_set_debug(ctx, LIBUSB_LOG_LEVEL_INFO);
+// #endif
+// }
 import "C"
-
 import (
 	"fmt"
-	"log"
-	"reflect"
-	"strings"
+	"math"
 	"unsafe"
 )
 
-//-----------------------------------------------------------------------------
-/*
+func bcdToDecimal(bcdValue uint16) float64 {
+	bcdPowersByPosition := []string{"hundreths", "tenths", "ones", "tens"}
 
-LICENSE:https://github.com/deadsy/libusb/blob/master/LICENSE
-
-*/
-//-----------------------------------------------------------------------------
-
-// Package libusb provides go wrappers for libusb-1.0
-//-----------------------------------------------------------------------------
-// utilities
-
-func bcd2str(x uint16) string {
-	if (x>>12)&15 != 0 {
-		return fmt.Sprintf("%d%d.%d%d", (x>>12)&15, (x>>8)&15, (x>>4)&15, (x>>0)&15)
-	} else {
-		return fmt.Sprintf("%d.%d%d", (x>>8)&15, (x>>4)&15, (x>>0)&15)
+	bcdMap := make(map[string]uint16)
+	for i, power := range bcdPowersByPosition {
+		bcdMap[power] = bcdValue & (0xf << uint(4*i)) / uint16(math.Pow(16, float64(i)))
 	}
+	return 10*float64(bcdMap["tens"]) + float64(bcdMap["ones"]) +
+		0.1*float64(bcdMap["tenths"]) + 0.01*float64(bcdMap["hundreths"])
 }
 
-func indent(s string) string {
-	x := strings.Split(s, "\n")
-	for i := range x {
-		x[i] = fmt.Sprintf("%s%s", "  ", x[i])
-	}
-	return strings.Join(x, "\n")
-}
+// LogLevel is an enum for the C libusb log message levels.
+type LogLevel int
 
-// return a string for the extra buffer
-func ExtraStr(x []byte) string {
-	s := make([]string, len(x))
-	for i, v := range x {
-		s[i] = fmt.Sprintf("%02x", v)
-	}
-	return fmt.Sprintf("[%s]", strings.Join(s, " "))
-}
-
-//-----------------------------------------------------------------------------
-
-// libusb API version.
-const API_VERSION = C.LIBUSB_API_VERSION
-
-// Device and/or Interface Class codes.
+// Log message levels
+//
+// http://bit.ly/enum_libusb_log_level
 const (
-	CLASS_PER_INTERFACE       = C.LIBUSB_CLASS_PER_INTERFACE
-	CLASS_AUDIO               = C.LIBUSB_CLASS_AUDIO
-	CLASS_COMM                = C.LIBUSB_CLASS_COMM
-	CLASS_HID                 = C.LIBUSB_CLASS_HID
-	CLASS_PHYSICAL            = C.LIBUSB_CLASS_PHYSICAL
-	CLASS_PRINTER             = C.LIBUSB_CLASS_PRINTER
-	CLASS_PTP                 = C.LIBUSB_CLASS_PTP
-	CLASS_IMAGE               = C.LIBUSB_CLASS_IMAGE
-	CLASS_MASS_STORAGE        = C.LIBUSB_CLASS_MASS_STORAGE
-	CLASS_HUB                 = C.LIBUSB_CLASS_HUB
-	CLASS_DATA                = C.LIBUSB_CLASS_DATA
-	CLASS_SMART_CARD          = C.LIBUSB_CLASS_SMART_CARD
-	CLASS_CONTENT_SECURITY    = C.LIBUSB_CLASS_CONTENT_SECURITY
-	CLASS_VIDEO               = C.LIBUSB_CLASS_VIDEO
-	CLASS_PERSONAL_HEALTHCARE = C.LIBUSB_CLASS_PERSONAL_HEALTHCARE
-	CLASS_DIAGNOSTIC_DEVICE   = C.LIBUSB_CLASS_DIAGNOSTIC_DEVICE
-	CLASS_WIRELESS            = C.LIBUSB_CLASS_WIRELESS
-	CLASS_APPLICATION         = C.LIBUSB_CLASS_APPLICATION
-	CLASS_VENDOR_SPEC         = C.LIBUSB_CLASS_VENDOR_SPEC
+	LogLevelNone    LogLevel = C.LIBUSB_LOG_LEVEL_NONE
+	LogLevelError   LogLevel = C.LIBUSB_LOG_LEVEL_ERROR
+	LogLevelWarning LogLevel = C.LIBUSB_LOG_LEVEL_WARNING
+	LogLevelInfo    LogLevel = C.LIBUSB_LOG_LEVEL_INFO
+	LogLevelDebug   LogLevel = C.LIBUSB_LOG_LEVEL_DEBUG
 )
 
-// Descriptor types as defined by the USB specification.
-const (
-	DT_DEVICE                = C.LIBUSB_DT_DEVICE
-	DT_CONFIG                = C.LIBUSB_DT_CONFIG
-	DT_STRING                = C.LIBUSB_DT_STRING
-	DT_INTERFACE             = C.LIBUSB_DT_INTERFACE
-	DT_ENDPOINT              = C.LIBUSB_DT_ENDPOINT
-	DT_BOS                   = C.LIBUSB_DT_BOS
-	DT_DEVICE_CAPABILITY     = C.LIBUSB_DT_DEVICE_CAPABILITY
-	DT_HID                   = C.LIBUSB_DT_HID
-	DT_REPORT                = C.LIBUSB_DT_REPORT
-	DT_PHYSICAL              = C.LIBUSB_DT_PHYSICAL
-	DT_HUB                   = C.LIBUSB_DT_HUB
-	DT_SUPERSPEED_HUB        = C.LIBUSB_DT_SUPERSPEED_HUB
-	DT_SS_ENDPOINT_COMPANION = C.LIBUSB_DT_SS_ENDPOINT_COMPANION
-)
-
-// Descriptor sizes per descriptor type.
-const DT_DEVICE_SIZE = C.LIBUSB_DT_DEVICE_SIZE
-const DT_CONFIG_SIZE = C.LIBUSB_DT_CONFIG_SIZE
-const DT_INTERFACE_SIZE = C.LIBUSB_DT_INTERFACE_SIZE
-const DT_ENDPOINT_SIZE = C.LIBUSB_DT_ENDPOINT_SIZE
-const DT_ENDPOINT_AUDIO_SIZE = C.LIBUSB_DT_ENDPOINT_AUDIO_SIZE
-const DT_HUB_NONVAR_SIZE = C.LIBUSB_DT_HUB_NONVAR_SIZE
-const DT_SS_ENDPOINT_COMPANION_SIZE = C.LIBUSB_DT_SS_ENDPOINT_COMPANION_SIZE
-const DT_BOS_SIZE = C.LIBUSB_DT_BOS_SIZE
-const DT_DEVICE_CAPABILITY_SIZE = C.LIBUSB_DT_DEVICE_CAPABILITY_SIZE
-
-// BOS descriptor sizes.
-const BT_USB_2_0_EXTENSION_SIZE = C.LIBUSB_BT_USB_2_0_EXTENSION_SIZE
-const BT_SS_USB_DEVICE_CAPABILITY_SIZE = C.LIBUSB_BT_SS_USB_DEVICE_CAPABILITY_SIZE
-const BT_CONTAINER_ID_SIZE = C.LIBUSB_BT_CONTAINER_ID_SIZE
-const DT_BOS_MAX_SIZE = C.LIBUSB_DT_BOS_MAX_SIZE
-const ENDPOINT_ADDRESS_MASK = C.LIBUSB_ENDPOINT_ADDRESS_MASK
-const ENDPOINT_DIR_MASK = C.LIBUSB_ENDPOINT_DIR_MASK
-
-// Endpoint direction. Values for bit 7 of EndpointDescriptor.BEndpointAddress.
-const (
-	ENDPOINT_IN  = C.LIBUSB_ENDPOINT_IN  // In: device-to-host.
-	ENDPOINT_OUT = C.LIBUSB_ENDPOINT_OUT // Out: host-to-device.
-)
-
-// in BmAttributes
-const TRANSFER_TYPE_MASK = C.LIBUSB_TRANSFER_TYPE_MASK
-
-// Endpoint transfer type. Values for bits 0:1 of EndpointDescriptor.BmAttributes.
-const (
-	TRANSFER_TYPE_CONTROL     = C.LIBUSB_TRANSFER_TYPE_CONTROL
-	TRANSFER_TYPE_ISOCHRONOUS = C.LIBUSB_TRANSFER_TYPE_ISOCHRONOUS
-	TRANSFER_TYPE_BULK        = C.LIBUSB_TRANSFER_TYPE_BULK
-	TRANSFER_TYPE_INTERRUPT   = C.LIBUSB_TRANSFER_TYPE_INTERRUPT
-	TRANSFER_TYPE_BULK_STREAM = C.LIBUSB_TRANSFER_TYPE_BULK_STREAM
-)
-
-// Standard requests, as defined in table 9-5 of the USB 3.0 specifications.
-const (
-	REQUEST_GET_STATUS        = C.LIBUSB_REQUEST_GET_STATUS
-	REQUEST_CLEAR_FEATURE     = C.LIBUSB_REQUEST_CLEAR_FEATURE
-	REQUEST_SET_FEATURE       = C.LIBUSB_REQUEST_SET_FEATURE
-	REQUEST_SET_ADDRESS       = C.LIBUSB_REQUEST_SET_ADDRESS
-	REQUEST_GET_DESCRIPTOR    = C.LIBUSB_REQUEST_GET_DESCRIPTOR
-	REQUEST_SET_DESCRIPTOR    = C.LIBUSB_REQUEST_SET_DESCRIPTOR
-	REQUEST_GET_CONFIGURATION = C.LIBUSB_REQUEST_GET_CONFIGURATION
-	REQUEST_SET_CONFIGURATION = C.LIBUSB_REQUEST_SET_CONFIGURATION
-	REQUEST_GET_INTERFACE     = C.LIBUSB_REQUEST_GET_INTERFACE
-	REQUEST_SET_INTERFACE     = C.LIBUSB_REQUEST_SET_INTERFACE
-	REQUEST_SYNCH_FRAME       = C.LIBUSB_REQUEST_SYNCH_FRAME
-	REQUEST_SET_SEL           = C.LIBUSB_REQUEST_SET_SEL
-	SET_ISOCH_DELAY           = C.LIBUSB_SET_ISOCH_DELAY
-)
-
-// Request type bits of Control_Setup.BmRequestType.
-const (
-	REQUEST_TYPE_STANDARD = C.LIBUSB_REQUEST_TYPE_STANDARD
-	REQUEST_TYPE_CLASS    = C.LIBUSB_REQUEST_TYPE_CLASS
-	REQUEST_TYPE_VENDOR   = C.LIBUSB_REQUEST_TYPE_VENDOR
-	REQUEST_TYPE_RESERVED = C.LIBUSB_REQUEST_TYPE_RESERVED
-)
-
-// Recipient bits of Control_Setup.BmRequestType in control transfers.
-// Values 4 through 31 are reserved.
-const (
-	RECIPIENT_DEVICE    = C.LIBUSB_RECIPIENT_DEVICE
-	RECIPIENT_INTERFACE = C.LIBUSB_RECIPIENT_INTERFACE
-	RECIPIENT_ENDPOINT  = C.LIBUSB_RECIPIENT_ENDPOINT
-	RECIPIENT_OTHER     = C.LIBUSB_RECIPIENT_OTHER
-)
-
-const ISO_SYNC_TYPE_MASK = C.LIBUSB_ISO_SYNC_TYPE_MASK
-
-// Synchronization type for isochronous endpoints.
-// Values for bits 2:3 of EndpointDescriptor.BmAttributes.
-const (
-	ISO_SYNC_TYPE_NONE     = C.LIBUSB_ISO_SYNC_TYPE_NONE
-	ISO_SYNC_TYPE_ASYNC    = C.LIBUSB_ISO_SYNC_TYPE_ASYNC
-	ISO_SYNC_TYPE_ADAPTIVE = C.LIBUSB_ISO_SYNC_TYPE_ADAPTIVE
-	ISO_SYNC_TYPE_SYNC     = C.LIBUSB_ISO_SYNC_TYPE_SYNC
-)
-
-const ISO_USAGE_TYPE_MASK = C.LIBUSB_ISO_USAGE_TYPE_MASK
-
-// Usage type for isochronous endpoints.
-// Values for bits 4:5 of EndpointDescriptor.BmAttributes.
-const (
-	ISO_USAGE_TYPE_DATA     = C.LIBUSB_ISO_USAGE_TYPE_DATA
-	ISO_USAGE_TYPE_FEEDBACK = C.LIBUSB_ISO_USAGE_TYPE_FEEDBACK
-	ISO_USAGE_TYPE_IMPLICIT = C.LIBUSB_ISO_USAGE_TYPE_IMPLICIT
-)
-
-const CONTROL_SETUP_SIZE = C.LIBUSB_CONTROL_SETUP_SIZE
-
-// Speed codes. Indicates the speed at which the device is operating.
-const (
-	SPEED_UNKNOWN = C.LIBUSB_SPEED_UNKNOWN
-	SPEED_LOW     = C.LIBUSB_SPEED_LOW
-	SPEED_FULL    = C.LIBUSB_SPEED_FULL
-	SPEED_HIGH    = C.LIBUSB_SPEED_HIGH
-	SPEED_SUPER   = C.LIBUSB_SPEED_SUPER
-)
-
-// Supported speeds (WSpeedSupported) bitfield. Indicates what speeds the device supports.
-const (
-	LOW_SPEED_OPERATION   = C.LIBUSB_LOW_SPEED_OPERATION
-	FULL_SPEED_OPERATION  = C.LIBUSB_FULL_SPEED_OPERATION
-	HIGH_SPEED_OPERATION  = C.LIBUSB_HIGH_SPEED_OPERATION
-	SUPER_SPEED_OPERATION = C.LIBUSB_SUPER_SPEED_OPERATION
-)
-
-// Bitmasks for USB_2_0_Extension_Descriptor.BmAttributes.
-const (
-	BM_LPM_SUPPORT = C.LIBUSB_BM_LPM_SUPPORT
-)
-
-// Bitmasks for SS_USB_Device_Capability_Descriptor.BmAttributes.
-const (
-	BM_LTM_SUPPORT = C.LIBUSB_BM_LTM_SUPPORT
-)
-
-// USB capability types.
-const (
-	BT_WIRELESS_USB_DEVICE_CAPABILITY = C.LIBUSB_BT_WIRELESS_USB_DEVICE_CAPABILITY
-	BT_USB_2_0_EXTENSION              = C.LIBUSB_BT_USB_2_0_EXTENSION
-	BT_SS_USB_DEVICE_CAPABILITY       = C.LIBUSB_BT_SS_USB_DEVICE_CAPABILITY
-	BT_CONTAINER_ID                   = C.LIBUSB_BT_CONTAINER_ID
-)
-
-// Error codes.
-const (
-	SUCCESS             = C.LIBUSB_SUCCESS
-	ERROR_IO            = C.LIBUSB_ERROR_IO
-	ERROR_INVALID_PARAM = C.LIBUSB_ERROR_INVALID_PARAM
-	ERROR_ACCESS        = C.LIBUSB_ERROR_ACCESS
-	ERROR_NO_DEVICE     = C.LIBUSB_ERROR_NO_DEVICE
-	ERROR_NOT_FOUND     = C.LIBUSB_ERROR_NOT_FOUND
-	ERROR_BUSY          = C.LIBUSB_ERROR_BUSY
-	ERROR_TIMEOUT       = C.LIBUSB_ERROR_TIMEOUT
-	ERROR_OVERFLOW      = C.LIBUSB_ERROR_OVERFLOW
-	ERROR_PIPE          = C.LIBUSB_ERROR_PIPE
-	ERROR_INTERRUPTED   = C.LIBUSB_ERROR_INTERRUPTED
-	ERROR_NO_MEM        = C.LIBUSB_ERROR_NO_MEM
-	ERROR_NOT_SUPPORTED = C.LIBUSB_ERROR_NOT_SUPPORTED
-	ERROR_OTHER         = C.LIBUSB_ERROR_OTHER
-)
-
-// Total number of error codes.
-const ERROR_COUNT = C.LIBUSB_ERROR_COUNT
-
-// Transfer status codes.
-const (
-	TRANSFER_COMPLETED = C.LIBUSB_TRANSFER_COMPLETED
-	TRANSFER_ERROR     = C.LIBUSB_TRANSFER_ERROR
-	TRANSFER_TIMED_OUT = C.LIBUSB_TRANSFER_TIMED_OUT
-	TRANSFER_CANCELLED = C.LIBUSB_TRANSFER_CANCELLED
-	TRANSFER_STALL     = C.LIBUSB_TRANSFER_STALL
-	TRANSFER_NO_DEVICE = C.LIBUSB_TRANSFER_NO_DEVICE
-	TRANSFER_OVERFLOW  = C.LIBUSB_TRANSFER_OVERFLOW
-)
-
-// Transfer.Flags values.
-const (
-	TRANSFER_SHORT_NOT_OK    = C.LIBUSB_TRANSFER_SHORT_NOT_OK
-	TRANSFER_FREE_BUFFER     = C.LIBUSB_TRANSFER_FREE_BUFFER
-	TRANSFER_FREE_TRANSFER   = C.LIBUSB_TRANSFER_FREE_TRANSFER
-	TRANSFER_ADD_ZERO_PACKET = C.LIBUSB_TRANSFER_ADD_ZERO_PACKET
-)
-
-// Capabilities supported by an instance of libusb on the current running platform.
-// Test if the loaded library supports a given capability by calling Has_Capability().
-const (
-	CAP_HAS_CAPABILITY                = C.LIBUSB_CAP_HAS_CAPABILITY
-	CAP_HAS_HOTPLUG                   = C.LIBUSB_CAP_HAS_HOTPLUG
-	CAP_HAS_HID_ACCESS                = C.LIBUSB_CAP_HAS_HID_ACCESS
-	CAP_SUPPORTS_DETACH_KERNEL_DRIVER = C.LIBUSB_CAP_SUPPORTS_DETACH_KERNEL_DRIVER
-)
-
-// Log message levels.
-const (
-	LOG_LEVEL_NONE    = C.LIBUSB_LOG_LEVEL_NONE
-	LOG_LEVEL_ERROR   = C.LIBUSB_LOG_LEVEL_ERROR
-	LOG_LEVEL_WARNING = C.LIBUSB_LOG_LEVEL_WARNING
-	LOG_LEVEL_INFO    = C.LIBUSB_LOG_LEVEL_INFO
-	LOG_LEVEL_DEBUG   = C.LIBUSB_LOG_LEVEL_DEBUG
-)
-
-// Flags for hotplug events.
-const (
-	// HOTPLUG_NO_FLAGS  = C.LIBUSB_HOTPLUG_NO_FLAGS
-	HOTPLUG_ENUMERATE = C.LIBUSB_HOTPLUG_ENUMERATE
-)
-
-// Hotplug events.
-const (
-	HOTPLUG_EVENT_DEVICE_ARRIVED = C.LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED
-	HOTPLUG_EVENT_DEVICE_LEFT    = C.LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT
-)
-
-// Wildcard matching for hotplug events.
-const HOTPLUG_MATCH_ANY = C.LIBUSB_HOTPLUG_MATCH_ANY
-
-//-----------------------------------------------------------------------------
-
-// A structure representing the standard USB endpoint descriptor.
-// This descriptor is documented in section 9.6.6 of the USB 3.0 specification.
-// All multiple-byte fields are represented in host-endian format.
-type EndpointDescriptor struct {
-	ptr              *C.struct_libusb_endpoint_descriptor
-	BLength          uint8
-	BDescriptorType  uint8
-	BEndpointAddress uint8
-	BmAttributes     uint8
-	WMaxPacketSize   uint16
-	BInterval        uint8
-	BRefresh         uint8
-	BSynchAddress    uint8
-	Extra            []byte
+var logLevels = map[LogLevel]string{
+	LogLevelNone:    "No messages ever printed by the library (default)",
+	LogLevelError:   "Error messages are printed to stderr",
+	LogLevelWarning: "Warning and error messages are printed to stderr",
+	LogLevelInfo:    "Informational messages are printed to stdout, warning and error messages are printed to stderr",
+	LogLevelDebug:   "Debug and informational messages are printed to stdout, warnings and errors to stderr",
 }
 
-func (x *C.struct_libusb_endpoint_descriptor) c2go() *EndpointDescriptor {
-	return &EndpointDescriptor{
-		ptr:              x,
-		BLength:          uint8(x.bLength),
-		BDescriptorType:  uint8(x.bDescriptorType),
-		BEndpointAddress: uint8(x.bEndpointAddress),
-		BmAttributes:     uint8(x.bmAttributes),
-		WMaxPacketSize:   uint16(x.wMaxPacketSize),
-		BInterval:        uint8(x.bInterval),
-		BRefresh:         uint8(x.bRefresh),
-		BSynchAddress:    uint8(x.bSynchAddress),
-		Extra:            C.GoBytes(unsafe.Pointer(x.extra), x.extra_length),
+func (level LogLevel) String() string {
+	return logLevels[level]
+}
+
+// Context represents a libusb session/context.
+type Context struct {
+	libusbContext *C.libusb_context
+	LogLevel      LogLevel
+}
+
+// NewContext intializes a new libusb session/context by creating a new
+// Context and returning a pointer to that Context.
+func NewContext() (*Context, error) {
+	newContext := &Context{
+		LogLevel: LogLevelNone,
 	}
-}
-
-// return a string for an EndpointDescriptor
-func (x *EndpointDescriptor) String() string {
-	s := make([]string, 0, 16)
-	s = append(s, fmt.Sprintf("bLength %d", x.BLength))
-	s = append(s, fmt.Sprintf("bDescriptorType %d", x.BDescriptorType))
-	s = append(s, fmt.Sprintf("bEndpointAddress 0x%02x", x.BEndpointAddress))
-	s = append(s, fmt.Sprintf("bmAttributes %d", x.BmAttributes))
-	s = append(s, fmt.Sprintf("wMaxPacketSize %d", x.WMaxPacketSize))
-	s = append(s, fmt.Sprintf("bInterval %d", x.BInterval))
-	s = append(s, fmt.Sprintf("bRefresh %d", x.BRefresh))
-	s = append(s, fmt.Sprintf("bSynchAddress %d", x.BSynchAddress))
-	s = append(s, fmt.Sprintf("extra %s", ExtraStr(x.Extra)))
-	return strings.Join(s, "\n")
-}
-
-//-----------------------------------------------------------------------------
-
-// A structure representing the standard USB interface descriptor.
-// This descriptor is documented in section 9.6.5 of the USB 3.0 specification.
-// All multiple-byte fields are represented in host-endian format.
-type InterfaceDescriptor struct {
-	ptr                *C.struct_libusb_interface_descriptor
-	BLength            uint8
-	BDescriptorType    uint8
-	BInterfaceNumber   uint8
-	BAlternateSetting  uint8
-	BNumEndpoints      uint8
-	BInterfaceClass    uint8
-	BInterfaceSubClass uint8
-	BInterfaceProtocol uint8
-	IInterface         uint8
-	Endpoint           []*EndpointDescriptor
-	Extra              []byte
-}
-
-func (x *C.struct_libusb_interface_descriptor) c2go() *InterfaceDescriptor {
-	var list []C.struct_libusb_endpoint_descriptor
-	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&list))
-	hdr.Cap = int(x.bNumEndpoints)
-	hdr.Len = int(x.bNumEndpoints)
-	hdr.Data = uintptr(unsafe.Pointer(x.endpoint))
-	endpoints := make([]*EndpointDescriptor, x.bNumEndpoints)
-	for i := range endpoints {
-		endpoints[i] = (&list[i]).c2go()
+	errnum := C.libusb_init(&newContext.libusbContext)
+	if errnum != 0 {
+		return nil, fmt.Errorf(
+			"failed to initialize new libusb context; received error %d", errnum)
 	}
-	return &InterfaceDescriptor{
-		ptr:                x,
-		BLength:            uint8(x.bLength),
-		BDescriptorType:    uint8(x.bDescriptorType),
-		BInterfaceNumber:   uint8(x.bInterfaceNumber),
-		BAlternateSetting:  uint8(x.bAlternateSetting),
-		BNumEndpoints:      uint8(x.bNumEndpoints),
-		BInterfaceClass:    uint8(x.bInterfaceClass),
-		BInterfaceSubClass: uint8(x.bInterfaceSubClass),
-		BInterfaceProtocol: uint8(x.bInterfaceProtocol),
-		IInterface:         uint8(x.iInterface),
-		Endpoint:           endpoints,
-		Extra:              C.GoBytes(unsafe.Pointer(x.extra), x.extra_length),
-	}
+	return newContext, nil
 }
 
-// return a string for an InterfaceDescriptor
-func (x *InterfaceDescriptor) String() string {
-	s := make([]string, 0, 16)
-	s = append(s, fmt.Sprintf("bLength %d", x.BLength))
-	s = append(s, fmt.Sprintf("bDescriptorType %d", x.BDescriptorType))
-	s = append(s, fmt.Sprintf("bInterfaceNumber %d", x.BInterfaceNumber))
-	s = append(s, fmt.Sprintf("bAlternateSetting %d", x.BAlternateSetting))
-	s = append(s, fmt.Sprintf("bNumEndpoints %d", x.BNumEndpoints))
-	s = append(s, fmt.Sprintf("bInterfaceClass %d", x.BInterfaceClass))
-	s = append(s, fmt.Sprintf("bInterfaceSubClass %d", x.BInterfaceSubClass))
-	s = append(s, fmt.Sprintf("bInterfaceProtocol %d", x.BInterfaceProtocol))
-	s = append(s, fmt.Sprintf("iInterface %d", x.IInterface))
-	for i, v := range x.Endpoint {
-		s = append(s, fmt.Sprintf("Endpoint %d:", i))
-		s = append(s, indent(v.String()))
-	}
-	s = append(s, fmt.Sprintf("extra %s", ExtraStr(x.Extra)))
-	return strings.Join(s, "\n")
-}
-
-//-----------------------------------------------------------------------------
-
-// A collection of alternate settings for a particular USB interface.
-type Interface struct {
-	ptr           *C.struct_libusb_interface
-	NumAltsetting int
-	Altsetting    []*InterfaceDescriptor
-}
-
-func (x *C.struct_libusb_interface) c2go() *Interface {
-	var list []C.struct_libusb_interface_descriptor
-	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&list))
-	hdr.Cap = int(x.num_altsetting)
-	hdr.Len = int(x.num_altsetting)
-	hdr.Data = uintptr(unsafe.Pointer(x.altsetting))
-	altsetting := make([]*InterfaceDescriptor, x.num_altsetting)
-	for i := range altsetting {
-		altsetting[i] = (&list[i]).c2go()
-	}
-	return &Interface{
-		ptr:           x,
-		NumAltsetting: int(x.num_altsetting),
-		Altsetting:    altsetting,
-	}
-}
-
-// return a string for an Interface
-func Interface_str(x *Interface) string {
-	s := make([]string, 0, 1)
-	s = append(s, fmt.Sprintf("numaltsetting %d", x.NumAltsetting))
-	for i, v := range x.Altsetting {
-		s = append(s, fmt.Sprintf("Interface Descriptor %d:", i))
-		s = append(s, indent(v.String()))
-	}
-	return strings.Join(s, "\n")
-}
-
-//-----------------------------------------------------------------------------
-
-// A structure representing the standard USB configuration descriptor.
-// This descriptor is documented in section 9.6.3 of the USB 3.0 specification.
-// All multiple-byte fields are represented in host-endian format.
-type ConfigDescriptor struct {
-	ptr                 *C.struct_libusb_config_descriptor
-	BLength             uint8
-	BDescriptorType     uint8
-	WTotalLength        uint16
-	BNumInterfaces      uint8
-	BConfigurationValue uint8
-	IConfiguration      uint8
-	BmAttributes        uint8
-	MaxPower            uint8
-	Interface           []*Interface
-	Extra               []byte
-}
-
-func (x *C.struct_libusb_config_descriptor) c2go() *ConfigDescriptor {
-	var list []C.struct_libusb_interface
-	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&list))
-	hdr.Cap = int(x.bNumInterfaces)
-	hdr.Len = int(x.bNumInterfaces)
-	hdr.Data = uintptr(unsafe.Pointer(x._interface))
-	interfaces := make([]*Interface, x.bNumInterfaces)
-	for i := range interfaces {
-		interfaces[i] = (&list[i]).c2go()
-	}
-	return &ConfigDescriptor{
-		ptr:                 x,
-		BLength:             uint8(x.bLength),
-		BDescriptorType:     uint8(x.bDescriptorType),
-		WTotalLength:        uint16(x.wTotalLength),
-		BNumInterfaces:      uint8(x.bNumInterfaces),
-		BConfigurationValue: uint8(x.bConfigurationValue),
-		IConfiguration:      uint8(x.iConfiguration),
-		BmAttributes:        uint8(x.bmAttributes),
-		MaxPower:            uint8(x.MaxPower),
-		Interface:           interfaces,
-		Extra:               C.GoBytes(unsafe.Pointer(x.extra), x.extra_length),
-	}
-}
-
-// return a string for a Config_Descriptor
-func (x *ConfigDescriptor) String() string {
-	s := make([]string, 0, 16)
-	s = append(s, fmt.Sprintf("bLength %d", x.BLength))
-	s = append(s, fmt.Sprintf("bDescriptorType %d", x.BDescriptorType))
-	s = append(s, fmt.Sprintf("wTotalLength %d", x.WTotalLength))
-	s = append(s, fmt.Sprintf("bNumInterfaces %d", x.BNumInterfaces))
-	s = append(s, fmt.Sprintf("bConfigurationValue %d", x.BConfigurationValue))
-	s = append(s, fmt.Sprintf("iConfiguration %d", x.IConfiguration))
-	s = append(s, fmt.Sprintf("bmAttributes %d", x.BmAttributes))
-	s = append(s, fmt.Sprintf("MaxPower %d", x.MaxPower))
-	for i, v := range x.Interface {
-		s = append(s, fmt.Sprintf("Interface %d:", i))
-		s = append(s, indent(fmt.Sprint(Interface_str(v))))
-	}
-	s = append(s, fmt.Sprintf("extra %s", ExtraStr(x.Extra)))
-	return strings.Join(s, "\n")
-}
-
-//-----------------------------------------------------------------------------
-
-// A structure representing the superspeed endpoint companion descriptor.
-// This descriptor is documented in section 9.6.7 of the USB 3.0 specification.
-// All multiple-byte fields are represented in host-endian format.
-type SS_Endpoint_Companion_Descriptor struct {
-	ptr               *C.struct_libusb_ss_endpoint_companion_descriptor
-	BLength           uint8
-	BDescriptorType   uint8
-	BMaxBurst         uint8
-	BmAttributes      uint8
-	WBytesPerInterval uint16
-}
-
-func (x *C.struct_libusb_ss_endpoint_companion_descriptor) c2go() *SS_Endpoint_Companion_Descriptor {
-	return &SS_Endpoint_Companion_Descriptor{
-		ptr:               x,
-		BLength:           uint8(x.bLength),
-		BDescriptorType:   uint8(x.bDescriptorType),
-		BMaxBurst:         uint8(x.bMaxBurst),
-		BmAttributes:      uint8(x.bmAttributes),
-		WBytesPerInterval: uint16(x.wBytesPerInterval),
-	}
-}
-
-//-----------------------------------------------------------------------------
-
-// A generic representation of a BOS Device Capability descriptor.
-// It is advised to check BDevCapabilityType and call the matching
-// Get_*_Descriptor function to get a structure fully matching the type.
-type BOS_Dev_Capability_Descriptor struct {
-	ptr                 *C.struct_libusb_bos_dev_capability_descriptor
-	BLength             uint8
-	BDescriptorType     uint8
-	BDevCapabilityType  uint8
-	Dev_capability_data []byte
-}
-
-func (x *C.struct_libusb_bos_dev_capability_descriptor) c2go() *BOS_Dev_Capability_Descriptor {
-	return &BOS_Dev_Capability_Descriptor{
-		ptr:                 x,
-		BLength:             uint8(x.bLength),
-		BDescriptorType:     uint8(x.bDescriptorType),
-		BDevCapabilityType:  uint8(x.bDevCapabilityType),
-		Dev_capability_data: C.GoBytes(unsafe.Pointer(C.dev_capability_data_ptr(x)), C.int(x.bLength-3)),
-	}
-}
-
-//-----------------------------------------------------------------------------
-
-// A structure representing the Binary Device Object Store (BOS) descriptor.
-// This descriptor is documented in section 9.6.2 of the USB 3.0 specification.
-// All multiple-byte fields are represented in host-endian format.
-type BOS_Descriptor struct {
-	ptr             *C.struct_libusb_bos_descriptor
-	BLength         uint8
-	BDescriptorType uint8
-	WTotalLength    uint16
-	Dev_capability  []*BOS_Dev_Capability_Descriptor
-}
-
-func (x *C.struct_libusb_bos_descriptor) c2go() *BOS_Descriptor {
-	var list []*C.struct_libusb_bos_dev_capability_descriptor
-	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&list))
-	hdr.Cap = int(x.bNumDeviceCaps)
-	hdr.Len = int(x.bNumDeviceCaps)
-	hdr.Data = uintptr(unsafe.Pointer(C.dev_capability_ptr(x)))
-	dev_capability := make([]*BOS_Dev_Capability_Descriptor, x.bNumDeviceCaps)
-	for i := range dev_capability {
-		dev_capability[i] = list[i].c2go()
-	}
-	return &BOS_Descriptor{
-		ptr:             x,
-		BLength:         uint8(x.bLength),
-		BDescriptorType: uint8(x.bDescriptorType),
-		WTotalLength:    uint16(x.wTotalLength),
-		Dev_capability:  dev_capability,
-	}
-}
-
-//-----------------------------------------------------------------------------
-
-// A structure representing the USB 2.0 Extension descriptor
-// This descriptor is documented in section 9.6.2.1 of the USB 3.0 specification.
-// All multiple-byte fields are represented in host-endian format.
-type USB_2_0_Extension_Descriptor struct {
-	ptr                *C.struct_libusb_usb_2_0_extension_descriptor
-	BLength            uint8
-	BDescriptorType    uint8
-	BDevCapabilityType uint8
-	BmAttributes       uint32
-}
-
-func (x *C.struct_libusb_usb_2_0_extension_descriptor) c2go() *USB_2_0_Extension_Descriptor {
-	return &USB_2_0_Extension_Descriptor{
-		ptr:                x,
-		BLength:            uint8(x.bLength),
-		BDescriptorType:    uint8(x.bDescriptorType),
-		BDevCapabilityType: uint8(x.bDevCapabilityType),
-		BmAttributes:       uint32(x.bmAttributes),
-	}
-}
-
-//-----------------------------------------------------------------------------
-
-// A structure representing the SuperSpeed USB Device Capability descriptor
-// This descriptor is documented in section 9.6.2.2 of the USB 3.0 specification.
-// All multiple-byte fields are represented in host-endian format.
-type SS_USB_Device_Capability_Descriptor struct {
-	ptr                   *C.struct_libusb_ss_usb_device_capability_descriptor
-	BLength               uint8
-	BDescriptorType       uint8
-	BDevCapabilityType    uint8
-	BmAttributes          uint8
-	WSpeedSupported       uint16
-	BFunctionalitySupport uint8
-	BU1DevExitLat         uint8
-	BU2DevExitLat         uint16
-}
-
-func (x *C.struct_libusb_ss_usb_device_capability_descriptor) c2go() *SS_USB_Device_Capability_Descriptor {
-	return &SS_USB_Device_Capability_Descriptor{
-		ptr:                   x,
-		BLength:               uint8(x.bLength),
-		BDescriptorType:       uint8(x.bDescriptorType),
-		BDevCapabilityType:    uint8(x.bDevCapabilityType),
-		BmAttributes:          uint8(x.bmAttributes),
-		WSpeedSupported:       uint16(x.wSpeedSupported),
-		BFunctionalitySupport: uint8(x.bFunctionalitySupport),
-		BU1DevExitLat:         uint8(x.bU1DevExitLat),
-		BU2DevExitLat:         uint16(x.bU2DevExitLat),
-	}
-}
-
-//-----------------------------------------------------------------------------
-
-// A structure representing the Container ID descriptor.
-// This descriptor is documented in section 9.6.2.3 of the USB 3.0 specification.
-// All multiple-byte fields, except UUIDs, are represented in host-endian format.
-type ContainerIDDescriptor struct {
-	ptr                *C.struct_libusb_container_id_descriptor
-	BLength            uint8
-	BDescriptorType    uint8
-	BDevCapabilityType uint8
-	BReserved          uint8
-	ContainerID        []byte
-}
-
-func (x *C.struct_libusb_container_id_descriptor) c2go() *ContainerIDDescriptor {
-	return &ContainerIDDescriptor{
-		ptr:                x,
-		BLength:            uint8(x.bLength),
-		BDescriptorType:    uint8(x.bDescriptorType),
-		BDevCapabilityType: uint8(x.bDevCapabilityType),
-		BReserved:          uint8(x.bReserved),
-		ContainerID:        C.GoBytes(unsafe.Pointer(&x.ContainerID[0]), 16),
-	}
-}
-
-//-----------------------------------------------------------------------------
-
-/*
-// Setup packet for control transfers.
-struct libusb_control_setup {
-	uint8_t  bmRequestType;
-	uint8_t  bRequest;
-	uint16_t wValue;
-	uint16_t wIndex;
-	uint16_t wLength;
-};
-*/
-
-//-----------------------------------------------------------------------------
-
-// A structure representing the standard USB device descriptor.
-// This descriptor is documented in section 9.6.1 of the USB 3.0 specification.
-// All multiple-byte fields are represented in host-endian format.
-type DeviceDescriptor struct {
-	ptr                *C.struct_libusb_device_descriptor
-	BLength            uint8
-	BDescriptorType    uint8
-	BcdUSB             uint16
-	BDeviceClass       uint8
-	BDeviceSubClass    uint8
-	BDeviceProtocol    uint8
-	BMaxPacketSize0    uint8
-	IDVendor           ID
-	IDProduct          ID
-	BcdDevice          uint16
-	IManufacturer      uint8
-	IProduct           uint8
-	ISerialNumber      uint8
-	BNumConfigurations uint8
-}
-
-func (x *C.struct_libusb_device_descriptor) c2go() *DeviceDescriptor {
-	return &DeviceDescriptor{
-		ptr:                x,
-		BLength:            uint8(x.bLength),
-		BDescriptorType:    uint8(x.bDescriptorType),
-		BcdUSB:             uint16(x.bcdUSB),
-		BDeviceClass:       uint8(x.bDeviceClass),
-		BDeviceSubClass:    uint8(x.bDeviceSubClass),
-		BDeviceProtocol:    uint8(x.bDeviceProtocol),
-		BMaxPacketSize0:    uint8(x.bMaxPacketSize0),
-		IDVendor:           ID(x.idVendor),
-		IDProduct:          ID(x.idProduct),
-		BcdDevice:          uint16(x.bcdDevice),
-		IManufacturer:      uint8(x.iManufacturer),
-		IProduct:           uint8(x.iProduct),
-		ISerialNumber:      uint8(x.iSerialNumber),
-		BNumConfigurations: uint8(x.bNumConfigurations),
-	}
-}
-
-// return a string for a Device_Descriptor
-func (x *DeviceDescriptor) String() string {
-	s := make([]string, 0, 16)
-	s = append(s, fmt.Sprintf("bLength %d", x.BLength))
-	s = append(s, fmt.Sprintf("bDescriptorType %d", x.BDescriptorType))
-	s = append(s, fmt.Sprintf("bcdUSB %s", bcd2str(x.BcdUSB)))
-	s = append(s, fmt.Sprintf("bDeviceClass %d", x.BDeviceClass))
-	s = append(s, fmt.Sprintf("bDeviceSubClass %d", x.BDeviceSubClass))
-	s = append(s, fmt.Sprintf("bDeviceProtocol %d", x.BDeviceProtocol))
-	s = append(s, fmt.Sprintf("bMaxPacketSize0 %d", x.BMaxPacketSize0))
-	s = append(s, fmt.Sprintf("idVendor 0x%04x", x.IDVendor))
-	s = append(s, fmt.Sprintf("idProduct 0x%04x", x.IDProduct))
-	s = append(s, fmt.Sprintf("bcdDevice %s", bcd2str(x.BcdDevice)))
-	s = append(s, fmt.Sprintf("iManufacturer %d", x.IManufacturer))
-	s = append(s, fmt.Sprintf("iProduct %d", x.IProduct))
-	s = append(s, fmt.Sprintf("iSerialNumber %d", x.ISerialNumber))
-	s = append(s, fmt.Sprintf("bNumConfigurations %d", x.BNumConfigurations))
-	return strings.Join(s, "\n")
-}
-
-//-----------------------------------------------------------------------------
-
-/*
-struct libusb_transfer {
-	libusb_device_handle *dev_handle;
-	uint8_t flags;
-	unsigned char endpoint;
-	unsigned char type;
-	unsigned int timeout;
-	enum libusb_transfer_status status;
-	int length;
-	int actual_length;
-	libusb_transfer_cb_fn callback;
-	void *user_data;
-	unsigned char *buffer;
-	int num_iso_packets;
-	struct libusb_iso_packet_descriptor iso_packet_desc[];
-};
-*/
-
-// The generic USB transfer structure. The user populates this structure and
-// then submits it in order to request a transfer. After the transfer has
-// completed, the library populates the transfer with the results and passes
-// it back to the user.
-type Transfer struct {
-	ptr *C.struct_libusb_transfer
-}
-
-func (x *C.struct_libusb_transfer) c2go() *Transfer {
-	return &Transfer{
-		ptr: x,
-	}
-}
-
-func (x *Transfer) go2c() *C.struct_libusb_transfer {
-	return x.ptr
-}
-
-// return a string for a Device_Descriptor
-func (x *Transfer) String() string {
-	s := make([]string, 0, 1)
-	return strings.Join(s, "\n")
-}
-
-//-----------------------------------------------------------------------------
-
-// Structure providing the version of the libusb runtime.
-type Version struct {
-	ptr      *C.struct_libusb_version
-	Major    uint16
-	Minor    uint16
-	Micro    uint16
-	Nano     uint16
-	Rc       string
-	Describe string
-}
-
-func (x *C.struct_libusb_version) c2go() *Version {
-	return &Version{
-		ptr:      x,
-		Major:    uint16(x.major),
-		Minor:    uint16(x.minor),
-		Micro:    uint16(x.micro),
-		Nano:     uint16(x.nano),
-		Rc:       C.GoString(x.rc),
-		Describe: C.GoString(x.describe),
-	}
-}
-
-//-----------------------------------------------------------------------------
-
-// Structure representing a libusb session.
-type Context *C.struct_libusb_context
-
-// Structure representing a USB device detected on the system.
-type Device *C.struct_libusb_device
-
-// Structure representing a handle on a USB device.
-type DeviceHandle *C.struct_libusb_device_handle
-
-// type Hotplug_Callback *C.struct_libusb_hotplug_callback
-
-//-----------------------------------------------------------------------------
-// errors
-
-type libusb_error struct {
-	Code int
-}
-
-func (e *libusb_error) Error() string {
-	return ErrorName(e.Code)
-}
-
-//-----------------------------------------------------------------------------
-// Library initialization/deinitialization
-
-func Init(ctx *Context) error {
-	rc := int(C.libusb_init((**C.struct_libusb_context)(ctx)))
-	if rc != 0 {
-		return &libusb_error{rc}
-	}
+// Close deinitializes the libusb session/context.
+func (ctx *Context) Close() error {
+	C.libusb_exit(ctx.libusbContext)
+	ctx.libusbContext = nil
 	return nil
 }
 
-func Exit(ctx Context) {
-	C.libusb_exit(ctx)
+// SetDebug sets the log message verbosity.
+func (ctx *Context) SetDebug(level LogLevel) {
+	C.set_debug(ctx.libusbContext, C.int(level))
+	ctx.LogLevel = level
 }
 
-//-----------------------------------------------------------------------------
-// Device handling and enumeration
-
-func GetDeviceList(ctx Context) ([]Device, error) {
-	var hdl **C.struct_libusb_device
-	rc := int(C.libusb_get_device_list(ctx, &hdl))
-	if rc < 0 {
-		return nil, &libusb_error{rc}
+// DeviceList returns an array of devices for the context.
+func (ctx *Context) DeviceList() ([]*Device, error) {
+	var devices []*Device
+	var list **C.libusb_device
+	const unrefDevices = 1
+	numDevicesFound := int(C.libusb_get_device_list(ctx.libusbContext, &list))
+	if numDevicesFound < 0 {
+		return nil, ErrorCode(numDevicesFound)
 	}
-	// turn the c array into a slice of device pointers
-	var list []Device
-	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&list))
-	hdr.Cap = rc
-	hdr.Len = rc
-	hdr.Data = uintptr(unsafe.Pointer(hdl))
-	return list, nil
-}
+	defer C.libusb_free_device_list(list, unrefDevices)
+	libusbDevices := unsafe.Slice(list, numDevicesFound)
+	// var libusbDevices []*C.libusb_device
+	// *(*reflect.SliceHeader)(unsafe.Pointer(&libusbDevices)) = reflect.SliceHeader{
+	// 	Data: uintptr(unsafe.Pointer(list)),
+	// 	Len:  numDevicesFound,
+	// 	Cap:  numDevicesFound,
+	// }
 
-func FreeDeviceList(list []Device, unref_devices int) {
-	if list == nil {
-		return
+	for _, thisLibusbDevice := range libusbDevices {
+		thisDevice := Device{
+			libusbDevice: thisLibusbDevice,
+		}
+		devices = append(devices, &thisDevice)
 	}
-	if len(list) == 0 {
-		return
-	}
-	C.libusb_free_device_list((**C.struct_libusb_device)(&list[0]), C.int(unref_devices))
+	return devices, nil
 }
 
-func GetBusNumber(dev Device) uint8 {
-	return uint8(C.libusb_get_bus_number(dev))
-}
-
-func GetPortNumber(dev Device) uint8 {
-	return uint8(C.libusb_get_port_number(dev))
-}
-
-func GetPortNumbers(dev Device, ports []byte) ([]byte, error) {
-	rc := int(C.libusb_get_port_numbers(dev, (*C.uint8_t)(&ports[0]), (C.int)(len(ports))))
-	if rc < 0 {
-		return nil, &libusb_error{rc}
-	}
-	return ports[:rc], nil
-}
-
-/*
-func Get_Parent(dev Device) Device {
-	return C.libusb_get_parent(dev)
-}
-*/
-
-func GetDeviceAddress(dev Device) uint8 {
-	return uint8(C.libusb_get_device_address(dev))
-}
-
-func GetDeviceSpeed(dev Device) int {
-	return int(C.libusb_get_device_speed(dev))
-}
-
-func GetMaxPacketSize(dev Device, endpoint uint8) int {
-	return int(C.libusb_get_max_packet_size(dev, (C.uchar)(endpoint)))
-}
-
-func GetMaxISOPacketSize(dev Device, endpoint uint8) int {
-	return int(C.libusb_get_max_iso_packet_size(dev, (C.uchar)(endpoint)))
-}
-
-func RefDevice(dev Device) Device {
-	return C.libusb_ref_device(dev)
-}
-
-func UnrefDevice(dev Device) {
-	C.libusb_unref_device(dev)
-}
-
-func Open(dev Device) (DeviceHandle, error) {
-	var hdl DeviceHandle
-	rc := int(C.libusb_open(dev, (**C.struct_libusb_device_handle)(&hdl)))
-	if rc < 0 {
-		return nil, &libusb_error{rc}
-	}
-	return hdl, nil
-}
-
-func OpenDeviceWithVIDPID(ctx Context, vendor_id uint16, product_id uint16) *DeviceHandle {
+// OpenDeviceWithVendorProduct opens a USB device using the VendorID and
+// productID and then returns a device handle.
+func (ctx *Context) OpenDeviceWithVendorProduct(
+	vendorID uint16,
+	productID uint16,
+) (*Device, *DeviceHandle, error) {
 	var deviceHandle DeviceHandle
-	deviceHandle = C.libusb_open_device_with_vid_pid(ctx, (C.uint16_t)(vendor_id), (C.uint16_t)(product_id))
-	if deviceHandle == nil {
-		return nil
+	deviceHandle.libusbDeviceHandle = C.libusb_open_device_with_vid_pid(
+		ctx.libusbContext, C.uint16_t(vendorID), C.uint16_t(productID))
+	if deviceHandle.libusbDeviceHandle == nil {
+		return nil, nil, fmt.Errorf("could not open USB device %v:%v",
+			vendorID,
+			productID,
+		)
 	}
-	p := make([]byte, 64)
-	idx := uint16(0x0000)
-	n, err := ControlTransfer(deviceHandle, 0xA1, 7, 0x0000, idx, p, 2000)
+	device := Device{
+		libusbDevice: C.libusb_get_device(deviceHandle.libusbDeviceHandle),
+	}
+	return &device, &deviceHandle, nil
+}
+
+type endpointAddress byte
+type endpointAttributes byte
+
+// EndpointDescriptor models the descriptor for a given endpoint.
+type EndpointDescriptor struct {
+	Length          int
+	DescriptorType  descriptorType
+	EndpointAddress endpointAddress
+	Attributes      endpointAttributes
+	MaxPacketSize   uint16
+	Interval        uint8
+	Refresh         uint8
+	SynchAddress    uint8
+}
+
+// Direction returns the endpointDirection.
+func (end *EndpointDescriptor) Direction() EndpointDirection {
+	return end.EndpointAddress.direction()
+}
+
+// Number returns the endpoint number in bits 0..3 in the endpoint
+// address.
+func (end *EndpointDescriptor) Number() byte {
+	return end.EndpointAddress.endpointNumber()
+}
+
+// TransferType returns the transfer type for an endpoint.
+func (end *EndpointDescriptor) TransferType() TransferType {
+	return end.Attributes.transferType()
+}
+
+func (address endpointAddress) direction() EndpointDirection {
+	// Bit 7 of the endpointAddress determines the direction
+	const directionMask = 0x80
+	const directionBit = 7
+	return EndpointDirection(address&directionMask) >> directionBit
+}
+
+func (address endpointAddress) endpointNumber() byte {
+	// Bits 0..3 determine the endpoint number
+	const endpointNumberMask = 0x0F
+	return byte(address & endpointNumberMask)
+}
+
+func (attributes endpointAttributes) transferType() TransferType {
+	// Bits 0..1 of the bmAttributes determines the transfer type
+	const transferTypeMask = 0x03
+	return TransferType(attributes & transferTypeMask)
+}
+
+// SupportedInterface models an supported USB interface and its associated
+// interface descriptors.
+type SupportedInterface struct {
+	InterfaceDescriptors
+	NumAltSettings int
+}
+
+// SupportedInterfaces contains an array of the supported USB interfaces for a
+// given USB device.
+type SupportedInterfaces []*SupportedInterface
+
+// InterfaceDescriptor "provides information about a function or feature that a
+// device implements." (Source: *USB Complete* 5th edition by Jan Axelson)
+type InterfaceDescriptor struct {
+	Length              int
+	DescriptorType      descriptorType
+	InterfaceNumber     int
+	AlternateSetting    int
+	NumEndpoints        int
+	InterfaceClass      uint8
+	InterfaceSubClass   uint8
+	InterfaceProtocol   uint8
+	InterfaceIndex      int
+	EndpointDescriptors []*EndpointDescriptor
+}
+
+// InterfaceDescriptors contains a slice of pointers to the available interface
+// descriptors.
+type InterfaceDescriptors []*InterfaceDescriptor
+
+// Config models the USB configuration.
+type Config struct {
+	*ConfigDescriptor
+	Device *Device
+}
+
+// ConfigDescriptor models the descriptor for the USB configuration
+type ConfigDescriptor struct {
+	Length               int
+	DescriptorType       descriptorType
+	TotalLength          uint16
+	NumInterfaces        int
+	ConfigurationValue   uint8
+	ConfigurationIndex   uint8
+	Attributes           uint8
+	MaxPowerMilliAmperes uint
+	SupportedInterfaces
+}
+
+type classCode byte
+type bcd uint16
+
+// String implements the Stringer interface for bcd.
+func (b bcd) String() string {
+	return fmt.Sprintf("%#04x (%2.2f)",
+		uint16(b),
+		b.AsDecimal(),
+	)
+}
+
+// AsDecimal converts the BCD value with a format 0xJJMN into a decimal JJ.MN
+// where JJ is the major version number, M is the minor version, and N is the
+// sub-minor version number.
+func (b bcd) AsDecimal() float64 {
+	return bcdToDecimal(uint16(b))
+}
+
+const (
+	perInterface       classCode = C.LIBUSB_CLASS_PER_INTERFACE
+	audio              classCode = C.LIBUSB_CLASS_AUDIO
+	comm               classCode = C.LIBUSB_CLASS_COMM
+	hid                classCode = C.LIBUSB_CLASS_HID
+	physical           classCode = C.LIBUSB_CLASS_PHYSICAL
+	printer            classCode = C.LIBUSB_CLASS_PRINTER
+	ptp                classCode = C.LIBUSB_CLASS_PTP
+	image              classCode = C.LIBUSB_CLASS_IMAGE
+	massStorage        classCode = C.LIBUSB_CLASS_MASS_STORAGE
+	hub                classCode = C.LIBUSB_CLASS_HUB
+	data               classCode = C.LIBUSB_CLASS_DATA
+	smartCard          classCode = C.LIBUSB_CLASS_SMART_CARD
+	contentSecurity    classCode = C.LIBUSB_CLASS_CONTENT_SECURITY
+	video              classCode = C.LIBUSB_CLASS_VIDEO
+	personalHealthcare classCode = C.LIBUSB_CLASS_PERSONAL_HEALTHCARE
+	diagnosticDevice   classCode = C.LIBUSB_CLASS_DIAGNOSTIC_DEVICE
+	wireless           classCode = C.LIBUSB_CLASS_WIRELESS
+	application        classCode = C.LIBUSB_CLASS_APPLICATION
+	vendorSpec         classCode = C.LIBUSB_CLASS_VENDOR_SPEC
+)
+
+var classCodes = map[classCode]string{
+	perInterface:       "Each interface specifies its own class information and all interfaces operate independently.",
+	audio:              "Audio class.",
+	comm:               "Communications class.",
+	hid:                "Human Interface Device class.",
+	physical:           "Physical.",
+	printer:            "Printer class.",
+	image:              "Image class.",
+	massStorage:        "Mass storage class.",
+	hub:                "Hub class.",
+	data:               "Data class.",
+	smartCard:          "Smart Card.",
+	contentSecurity:    "Content Security.",
+	video:              "Video.",
+	personalHealthcare: "Personal Healthcare.",
+	diagnosticDevice:   "Diagnostic Device.",
+	wireless:           "Wireless class.",
+	application:        "Application class.",
+	vendorSpec:         "Class is vendor-specific.",
+}
+
+// String implements the Stringer interface for classCode.
+func (classCode classCode) String() string {
+	return classCodes[classCode]
+}
+
+type descriptorType byte
+
+const (
+	descDevice            descriptorType = C.LIBUSB_DT_DEVICE
+	descConfig            descriptorType = C.LIBUSB_DT_CONFIG
+	descString            descriptorType = C.LIBUSB_DT_STRING
+	descInterface         descriptorType = C.LIBUSB_DT_INTERFACE
+	descEndpoint          descriptorType = C.LIBUSB_DT_ENDPOINT
+	descBos               descriptorType = C.LIBUSB_DT_BOS
+	descDeviceCapability  descriptorType = C.LIBUSB_DT_DEVICE_CAPABILITY
+	descHid               descriptorType = C.LIBUSB_DT_HID
+	descReport            descriptorType = C.LIBUSB_DT_REPORT
+	descPhysical          descriptorType = C.LIBUSB_DT_PHYSICAL
+	descHub               descriptorType = C.LIBUSB_DT_HUB
+	descSuperspeedHub     descriptorType = C.LIBUSB_DT_SUPERSPEED_HUB
+	descEndpointCompanion descriptorType = C.LIBUSB_DT_SS_ENDPOINT_COMPANION
+)
+
+var descriptorTypes = map[descriptorType]string{
+	descDevice:            "Device descriptor.",
+	descConfig:            "Configuration descriptor.",
+	descString:            "String descriptor.",
+	descInterface:         "Interface descriptor.",
+	descEndpoint:          "Endpoint descriptor.",
+	descBos:               "BOS descriptor.",
+	descDeviceCapability:  "Device Capability descriptor.",
+	descHid:               "HID descriptor.",
+	descReport:            "HID report descriptor.",
+	descPhysical:          "Physical descriptor.",
+	descHub:               "Hub descriptor.",
+	descSuperspeedHub:     "SuperSpeed Hub descriptor.",
+	descEndpointCompanion: "SuperSpeed Endpoint Companion descriptor.",
+}
+
+func (descriptorType descriptorType) String() string {
+	return descriptorTypes[descriptorType]
+}
+
+// EndpointDirection provides the type for an in or out endpoint.
+type EndpointDirection byte
+
+const (
+	// Per USB 2.0 spec bit 7 of the endpoint address defines the direction,
+	// where 0 = OUT and 1 = IN. The libusb C.LIBUSB_ENDPOINT_IN enumeration is
+	// 128 instead of 1. Therefore, I'm not using C.LIBUSB_ENDPOINT_IN (128).
+	endpointOut   EndpointDirection = C.LIBUSB_ENDPOINT_OUT
+	endpointIn    EndpointDirection = 1
+	directionMask endpointAddress   = 0x80
+	directionBit                    = 7
+)
+
+var endpointDirections = map[EndpointDirection]string{
+	endpointOut: "Out: host-to-device.",
+	endpointIn:  "In: device-to-host.",
+}
+
+// String implements the Stringer interface for endpointDirection.
+func (endpointDirection EndpointDirection) String() string {
+	return endpointDirections[endpointDirection]
+}
+
+// TransferType provides which type of transfer.
+type TransferType int
+
+// Endpoint transfer type http://bit.ly/enum_libusb_transfer_type
+const (
+	ControlTransfer     TransferType = C.LIBUSB_TRANSFER_TYPE_CONTROL
+	IsochronousTransfer TransferType = C.LIBUSB_TRANSFER_TYPE_ISOCHRONOUS
+	BulkTransfer        TransferType = C.LIBUSB_TRANSFER_TYPE_BULK
+	InterruptTransfer   TransferType = C.LIBUSB_TRANSFER_TYPE_INTERRUPT
+)
+
+var transferTypes = map[TransferType]string{
+	ControlTransfer:     "Control endpoint.",
+	IsochronousTransfer: "Isochronous endpoint.",
+	BulkTransfer:        "Bulk endpoint.",
+	InterruptTransfer:   "Interrupt endpoint.",
+}
+
+func (transferType TransferType) String() string {
+	return transferTypes[transferType]
+}
+
+// TODO(mdr): May want to replace uint8 with a type specific for indexes.
+
+type synchronizationType byte
+
+// Synchronization type for isochronous endpoints. "Values for bits 2:3 of the
+// bmAttributes field in libusb_endpoint_descriptor"
+// http://bit.ly/enum_libusb_iso_sync_type
+const (
+	IsoSyncTypeNone     synchronizationType = C.LIBUSB_ISO_SYNC_TYPE_NONE
+	IsoSyncTypeAsync    synchronizationType = C.LIBUSB_ISO_SYNC_TYPE_ASYNC
+	IsoSyncTypeAdaptive synchronizationType = C.LIBUSB_ISO_SYNC_TYPE_ADAPTIVE
+	IsoSynceTypeSync    synchronizationType = C.LIBUSB_ISO_SYNC_TYPE_SYNC
+)
+
+// Device represents a USB device including the opaque libusb_device struct.
+type Device struct {
+	libusbDevice        *C.libusb_device
+	ActiveConfiguration *ConfigDescriptor
+}
+
+// Descriptor represents a USB device descriptor as a Go struct.
+type Descriptor struct {
+	Length              uint8
+	DescriptorType      descriptorType
+	USBSpecification    bcd
+	DeviceClass         classCode
+	DeviceSubClass      byte
+	DeviceProtocol      byte
+	MaxPacketSize0      uint8
+	VendorID            uint16
+	ProductID           uint16
+	DeviceReleaseNumber bcd
+	ManufacturerIndex   uint8
+	ProductIndex        uint8
+	SerialNumberIndex   uint8
+	NumConfigurations   uint8
+}
+
+// BusNumber gets "the number of the bus that a device is connected to."
+// (Source: libusb docs)
+func (dev *Device) BusNumber() (int, error) {
+	busNumber, err := C.libusb_get_bus_number(dev.libusbDevice)
 	if err != nil {
-		log.Printf("Error sending control transfer: %s", err)
+		return 0, err
 	}
-	log.Printf("Sent %d bytes on control transfer", n)
-	log.Printf("capabilities = %q", p)
-	log.Printf("capabilities = %v", p)
-	log.Printf("cap[14] := %b (%d)", p[14], p[14])
-	log.Printf("cap[15] := %b (%d)", p[15], p[15])
-	return &deviceHandle
+	return int(busNumber), nil
 }
 
-func Close(hdl DeviceHandle) {
-	C.libusb_close(hdl)
-}
-
-func GetDevice(hdl DeviceHandle) Device {
-	return C.libusb_get_device(hdl)
-}
-
-func GetConfiguration(hdl DeviceHandle) (int, error) {
-	var config C.int
-	rc := int(C.libusb_get_configuration(hdl, &config))
-	if rc < 0 {
-		return 0, &libusb_error{rc}
+// PortNumber gets "the number of the port that a device is connected to.
+// Unless the OS does something funky, or you are hot-plugging USB extension
+// cards, the port number returned by this call is usually guaranteed to be
+// uniquely tied to a physical port, meaning that different devices plugged on
+// the same physical port should return the same port number.  But outside of
+// this, there is no guarantee that the port number returned by this call will
+// remain the same, or even match the order in which ports have been numbered
+// by the HUB/HCD manufacturer." (Source: libusb docs)
+func (dev *Device) PortNumber() (int, error) {
+	portNumber, err := C.libusb_get_port_number(dev.libusbDevice)
+	if err != nil {
+		return 0, fmt.Errorf("port number is unavailable for device %v", dev)
 	}
-	return int(config), nil
+	return int(portNumber), nil
 }
 
-func SetConfiguration(hdl DeviceHandle, configuration int) error {
-	rc := int(C.libusb_set_configuration(hdl, (C.int)(configuration)))
-	if rc < 0 {
-		return &libusb_error{rc}
+// MaxPacketSize is a "convenience function to retrieve the wMaxPacketSize
+// value for a particular endpoint in the active device configuration. This
+// function was originally intended to be of assistance when setting up
+// isochronous transfers, but a design mistake resulted in this function
+// instead. It simply returns the wMaxPacketSize value without considering its
+// contents. If you're dealing with isochronous transfers, you probably want
+// libusb_get_max_iso_packet_size() instead." (Source: libusb docs)
+func (dev *Device) MaxPacketSize(ep endpointAddress) (int, error) {
+	maxPacketSize, err := C.libusb_get_max_packet_size(dev.libusbDevice, C.uchar(ep))
+	if err != nil {
+		return 0, fmt.Errorf("wMaxPacketSize is unavailable for device %v", dev)
 	}
-	return nil
+	return int(maxPacketSize), nil
 }
 
-func ClaimInterface(hdl DeviceHandle, interface_number int) error {
-	rc := int(C.libusb_claim_interface(hdl, (C.int)(interface_number)))
-	if rc < 0 {
-		return &libusb_error{rc}
+// DeviceAddress gets "the address of the device on the bus it is connected
+// to." (Source: libusb docs)
+func (dev *Device) DeviceAddress() (int, error) {
+	deviceAddress, err := C.libusb_get_device_address(dev.libusbDevice)
+	if err != nil {
+		return 0, err
 	}
-	return nil
+	return int(deviceAddress), nil
 }
 
-func ReleaseInterface(hdl DeviceHandle, interface_number int) error {
-	rc := int(C.libusb_release_interface(hdl, (C.int)(interface_number)))
-	if rc < 0 {
-		return &libusb_error{rc}
+// Speed gets "the negotiated connection speed for a device." (Source:
+// libusb docs)
+func (dev *Device) Speed() (SpeedType, error) {
+	deviceSpeed, err := C.libusb_get_device_speed(dev.libusbDevice)
+	if err != nil {
+		return 0, err
 	}
-	return nil
+	return SpeedType(deviceSpeed), nil
 }
 
-func SetInterfaceAltSetting(hdl DeviceHandle, interface_number int, alternate_setting int) error {
-	rc := int(C.libusb_set_interface_alt_setting(hdl, (C.int)(interface_number), (C.int)(alternate_setting)))
-	if rc < 0 {
-		return &libusb_error{rc}
+// Open will "open a device and obtain a device handle. A handle allows you to
+// perform I/O on the device in question. Internally, this function adds a
+// reference to the device and makes it available to you through
+// libusb_get_device(). This reference is removed during libusb_close()." This
+// is a non-blocking function; no requests are sent over the bus. (Source:
+// libusb docs)
+func (dev *Device) Open() (*DeviceHandle, error) {
+	var handle *C.libusb_device_handle
+	err := C.libusb_open(dev.libusbDevice, &handle)
+	if err != 0 {
+		return nil, ErrorCode(err)
 	}
-	return nil
-}
-
-func ClearHalt(hdl DeviceHandle, endpoint uint8) error {
-	rc := int(C.libusb_clear_halt(hdl, (C.uchar)(endpoint)))
-	if rc < 0 {
-		return &libusb_error{rc}
+	deviceHandle := &DeviceHandle{
+		libusbDeviceHandle: handle,
 	}
-	return nil
+	return deviceHandle, nil
 }
 
-func ResetDevice(hdl DeviceHandle) error {
-	rc := int(C.libusb_reset_device(hdl))
-	if rc < 0 {
-		return &libusb_error{rc}
-	}
-	return nil
-}
-
-func KernelDriverActive(hdl DeviceHandle, interface_number int) (bool, error) {
-	rc := int(C.libusb_kernel_driver_active(hdl, (C.int)(interface_number)))
-	if rc < 0 {
-		return false, &libusb_error{rc}
-	}
-	return rc != 0, nil
-}
-
-func DetachKernelDriver(hdl DeviceHandle, interface_number int) error {
-	rc := int(C.libusb_detach_kernel_driver(hdl, (C.int)(interface_number)))
-	if rc < 0 {
-		return &libusb_error{rc}
-	}
-	return nil
-}
-
-func AttachKernelDriver(hdl DeviceHandle, interface_number int) error {
-	rc := int(C.libusb_attach_kernel_driver(hdl, (C.int)(interface_number)))
-	if rc < 0 {
-		return &libusb_error{rc}
-	}
-	return nil
-}
-
-func Set_Auto_Detach_Kernel_Driver(hdl DeviceHandle, enable bool) error {
-	enable_int := 0
-	if enable {
-		enable_int = 1
-	}
-	rc := int(C.libusb_set_auto_detach_kernel_driver(hdl, (C.int)(enable_int)))
-	if rc < 0 {
-		return &libusb_error{rc}
-	}
-	return nil
-}
-
-//-----------------------------------------------------------------------------
-// Miscellaneous
-
-/*
-func Has_Capability(capability uint32) bool {
-	rc := int(C.libusb_has_capability((C.uint32_t)(capability)))
-	return rc != 0
-}
-*/
-
-func ErrorName(code int) string {
-	return C.GoString(C.libusb_error_name(C.int(code)))
-}
-
-func GetVersion() *Version {
-	ver := (*C.struct_libusb_version)(unsafe.Pointer(C.libusb_get_version()))
-	return ver.c2go()
-}
-
-func CPU_To_LE16(x uint16) uint16 {
-	return uint16(C.libusb_cpu_to_le16((C.uint16_t)(x)))
-}
-
-/*
-func Setlocale(locale string) error {
-	cstr := C.CString(locale)
-	rc := int(C.libusb_setlocale(cstr))
-	if rc < 0 {
-		return &libusb_error{rc}
-	}
-	return nil
-}
-*/
-
-func Strerror(errcode int) string {
-	return C.GoString(C.libusb_strerror(C.int(errcode)))
-}
-
-//-----------------------------------------------------------------------------
-// USB descriptors
-
-func GetDeviceDescriptor(dev Device) (*DeviceDescriptor, error) {
+// DeviceDescriptor implements the libusb_get_device_descriptor function to
+// update the DeviceDescriptor struct embedded in the Device.  DeviceDescriptor
+// gets "the USB device descriptor for a given device. This is a non-blocking
+// function; the device descriptor is cached in memory. Note since
+// libusb-1.0.16, LIBUSB_API_VERSION >= 0x01000102, this function always
+// succeeds." (Source: libusb docs)
+func (dev *Device) DeviceDescriptor() (*Descriptor, error) {
 	var desc C.struct_libusb_device_descriptor
-	rc := int(C.libusb_get_device_descriptor(dev, &desc))
-	if rc != 0 {
-		return nil, &libusb_error{rc}
+	err := C.libusb_get_device_descriptor(dev.libusbDevice, &desc)
+	if err != 0 {
+		return nil, ErrorCode(err)
 	}
-	return (&desc).c2go(), nil
-}
-
-func GetActiveConfigDescriptor(dev Device) (*ConfigDescriptor, error) {
-	var desc *C.struct_libusb_config_descriptor
-	rc := int(C.libusb_get_active_config_descriptor(dev, &desc))
-	if rc != 0 {
-		return nil, &libusb_error{rc}
+	deviceDescriptor := Descriptor{
+		Length:              uint8(desc.bLength),
+		DescriptorType:      descriptorType(desc.bDescriptorType),
+		USBSpecification:    bcd(desc.bcdUSB),
+		DeviceClass:         classCode(desc.bDeviceClass),
+		DeviceSubClass:      byte(desc.bDeviceSubClass),
+		DeviceProtocol:      byte(desc.bDeviceProtocol),
+		MaxPacketSize0:      uint8(desc.bMaxPacketSize0),
+		VendorID:            uint16(desc.idVendor),
+		ProductID:           uint16(desc.idProduct),
+		DeviceReleaseNumber: bcd(desc.bcdDevice),
+		ManufacturerIndex:   uint8(desc.iManufacturer),
+		ProductIndex:        uint8(desc.iProduct),
+		SerialNumberIndex:   uint8(desc.iSerialNumber),
+		NumConfigurations:   uint8(desc.bNumConfigurations),
 	}
-	return desc.c2go(), nil
+	return &deviceDescriptor, nil
 }
 
-func GetConfigDescriptor(dev Device, config_index uint8) (*ConfigDescriptor, error) {
-	var desc *C.struct_libusb_config_descriptor
-	rc := int(C.libusb_get_config_descriptor(dev, (C.uint8_t)(config_index), &desc))
-	if rc != 0 {
-		return nil, &libusb_error{rc}
+// ActiveConfigDescriptor "gets the USB configuration descriptor for the
+// currently active configuration. This is a non-blocking function which does
+// not involve any requests being sent to the device." (Source: libusb docs)
+func (dev *Device) ActiveConfigDescriptor() (*ConfigDescriptor, error) {
+	var config *C.struct_libusb_config_descriptor
+	err := C.libusb_get_active_config_descriptor(dev.libusbDevice, &config)
+	defer C.libusb_free_config_descriptor(config)
+	if err != 0 {
+		return nil, ErrorCode(err)
 	}
-	return desc.c2go(), nil
-}
-
-func GetConfigDescriptorByValue(dev Device, bConfigurationValue uint8) (*ConfigDescriptor, error) {
-	var desc *C.struct_libusb_config_descriptor
-	rc := int(C.libusb_get_config_descriptor_by_value(dev, (C.uint8_t)(bConfigurationValue), &desc))
-	if rc != 0 {
-		return nil, &libusb_error{rc}
+	activeConfiguration := &ConfigDescriptor{
+		Length:               int(config.bLength),
+		DescriptorType:       descriptorType(config.bDescriptorType),
+		TotalLength:          uint16(config.wTotalLength),
+		NumInterfaces:        int(config.bNumInterfaces),
+		ConfigurationValue:   uint8(config.bConfigurationValue),
+		ConfigurationIndex:   uint8(config.iConfiguration),
+		Attributes:           uint8(config.bmAttributes),
+		MaxPowerMilliAmperes: 2 * uint(config.MaxPower), // Convert from 2 mA to just mA
+		SupportedInterfaces:  nil,
 	}
-	return desc.c2go(), nil
-}
+	var cInterface *C.struct_libusb_interface = config._interface
+	length := activeConfiguration.NumInterfaces
+	libusbInterfaces := unsafe.Slice(cInterface, length)
+	// hdr := reflect.SliceHeader{
+	// 	Data: uintptr(unsafe.Pointer(cInterface)),
+	// 	Len:  length,
+	// 	Cap:  length,
+	// }
+	// libusbInterfaces := *(*[]C.struct_libusb_interface)(unsafe.Pointer(&hdr))
 
-func FreeConfigDescriptor(config *ConfigDescriptor) {
-	C.libusb_free_config_descriptor(config.ptr)
-}
+	var supportedInterfaces SupportedInterfaces
+	// Loop through the array of interfaces support by this configuration
+	// const struct libusb_interface * interface
+	for _, libusbInterface := range libusbInterfaces {
+		supportedInterface := SupportedInterface{
+			NumAltSettings:       int(libusbInterface.num_altsetting),
+			InterfaceDescriptors: nil,
+		}
+		var interfaceDescriptors InterfaceDescriptors
+		var cInterfaceDescriptor *C.struct_libusb_interface_descriptor = libusbInterface.altsetting
+		length := int(libusbInterface.num_altsetting)
+		libusbInterfaceDescriptors := unsafe.Slice(cInterfaceDescriptor, length)
+		// hdr := reflect.SliceHeader{
+		// 	Data: uintptr(unsafe.Pointer(cInterfaceDescriptor)),
+		// 	Len:  length,
+		// 	Cap:  length,
+		// }
+		// libusbInterfaceDescriptors := *(*[]C.struct_libusb_interface_descriptor)(unsafe.Pointer(&hdr))
 
-func Get_SS_Endpoint_Companion_Descriptor(ctx Context, endpoint *EndpointDescriptor) (*SS_Endpoint_Companion_Descriptor, error) {
-	var desc *C.struct_libusb_ss_endpoint_companion_descriptor
-	rc := int(C.libusb_get_ss_endpoint_companion_descriptor(ctx, endpoint.ptr, &desc))
-	if rc != 0 {
-		return nil, &libusb_error{rc}
+		// Loop through the array of interface descriptors
+		// const struct libusb_interface_descriptor * altsetting
+		for _, libusbInterfaceDescriptor := range libusbInterfaceDescriptors {
+			interfaceDescriptor := InterfaceDescriptor{
+				Length:              int(libusbInterfaceDescriptor.bLength),
+				DescriptorType:      descriptorType(libusbInterfaceDescriptor.bDescriptorType),
+				InterfaceNumber:     int(libusbInterfaceDescriptor.bInterfaceNumber),
+				AlternateSetting:    int(libusbInterfaceDescriptor.bAlternateSetting),
+				NumEndpoints:        int(libusbInterfaceDescriptor.bNumEndpoints),
+				InterfaceClass:      uint8(libusbInterfaceDescriptor.bInterfaceClass),
+				InterfaceSubClass:   uint8(libusbInterfaceDescriptor.bInterfaceSubClass),
+				InterfaceProtocol:   uint8(libusbInterfaceDescriptor.bInterfaceProtocol),
+				InterfaceIndex:      int(libusbInterfaceDescriptor.iInterface),
+				EndpointDescriptors: nil,
+			}
+			var endpointDescriptors []*EndpointDescriptor
+			var cEndpointDescriptor *C.struct_libusb_endpoint_descriptor = libusbInterfaceDescriptor.endpoint
+			length := int(libusbInterfaceDescriptor.bNumEndpoints)
+			libusbEndpointDescriptors := unsafe.Slice(cEndpointDescriptor, length)
+			// hdr := reflect.SliceHeader{
+			// 	Data: uintptr(unsafe.Pointer(cEndpointDescriptor)),
+			// 	Len:  length,
+			// 	Cap:  length,
+			// }
+
+			// libusbEndpointDescriptors := *(*[]C.struct_libusb_endpoint_descriptor)(unsafe.Pointer(&hdr))
+
+			// Loop through the array of endpoint descriptors
+			// const struct libusb_endpoint_descriptor * endpoint
+			for _, libusbEndpointDescriptor := range libusbEndpointDescriptors {
+				endpointDescriptor := EndpointDescriptor{
+					Length:          int(libusbEndpointDescriptor.bLength),
+					DescriptorType:  descriptorType(libusbEndpointDescriptor.bDescriptorType),
+					EndpointAddress: endpointAddress(libusbEndpointDescriptor.bEndpointAddress),
+					Attributes:      endpointAttributes(libusbEndpointDescriptor.bmAttributes),
+					MaxPacketSize:   uint16(libusbEndpointDescriptor.wMaxPacketSize),
+					Interval:        uint8(libusbEndpointDescriptor.bInterval),
+				}
+				endpointDescriptors = append(endpointDescriptors, &endpointDescriptor)
+			}
+			interfaceDescriptor.EndpointDescriptors = endpointDescriptors
+			interfaceDescriptors = append(interfaceDescriptors, &interfaceDescriptor)
+		}
+		supportedInterface.InterfaceDescriptors = interfaceDescriptors
+		supportedInterfaces = append(supportedInterfaces, &supportedInterface)
 	}
-	return desc.c2go(), nil
+	activeConfiguration.SupportedInterfaces = supportedInterfaces
+	return activeConfiguration, nil
 }
 
-func Free_SS_Endpoint_Companion_Descriptor(ep_comp *SS_Endpoint_Companion_Descriptor) {
-	C.libusb_free_ss_endpoint_companion_descriptor(ep_comp.ptr)
-}
-
-func Get_BOS_Descriptor(hdl DeviceHandle) (*BOS_Descriptor, error) {
-	var desc *C.struct_libusb_bos_descriptor
-	rc := int(C.libusb_get_bos_descriptor(hdl, &desc))
-	if rc != 0 {
-		return nil, &libusb_error{rc}
+// ConfigDescriptor "gets a USB configuration descriptor based on its index.
+// This is a non-blocking function which does not involve any requests being
+// sent to the device." (Source: libusb docs)
+func (dev *Device) ConfigDescriptor(configIndex int) (*ConfigDescriptor, error) {
+	var cConfig *C.struct_libusb_config_descriptor
+	err := C.libusb_get_config_descriptor(dev.libusbDevice, C.uint8_t(configIndex), &cConfig)
+	defer C.libusb_free_config_descriptor(cConfig)
+	if err != 0 {
+		return nil, ErrorCode(err)
 	}
-	return desc.c2go(), nil
-}
-
-func FreeBOSDescriptor(bos *BOS_Descriptor) {
-	C.libusb_free_bos_descriptor(bos.ptr)
-}
-
-func Get_USB_2_0_Extension_Descriptor(ctx Context, dev_cap *BOS_Dev_Capability_Descriptor) (*USB_2_0_Extension_Descriptor, error) {
-	var desc *C.struct_libusb_usb_2_0_extension_descriptor
-	rc := int(C.libusb_get_usb_2_0_extension_descriptor(ctx, dev_cap.ptr, &desc))
-	if rc != 0 {
-		return nil, &libusb_error{rc}
+	configuration := &ConfigDescriptor{
+		Length:               int(cConfig.bLength),
+		DescriptorType:       descriptorType(cConfig.bDescriptorType),
+		TotalLength:          uint16(cConfig.wTotalLength),
+		NumInterfaces:        int(cConfig.bNumInterfaces),
+		ConfigurationValue:   uint8(cConfig.bConfigurationValue),
+		ConfigurationIndex:   uint8(cConfig.iConfiguration),
+		Attributes:           uint8(cConfig.bmAttributes),
+		MaxPowerMilliAmperes: 2 * uint(cConfig.MaxPower), // Convert from 2 mA to just mA
+		SupportedInterfaces:  nil,
 	}
-	return desc.c2go(), nil
+	return configuration, nil
 }
 
-func FreeUSB_2_0_Extension_Descriptor(usb_2_0_extension *USB_2_0_Extension_Descriptor) {
-	C.libusb_free_usb_2_0_extension_descriptor(usb_2_0_extension.ptr)
-}
-
-func GetSSUSBDeviceCapabilityDescriptor(ctx Context, dev_cap *BOS_Dev_Capability_Descriptor) (*SS_USB_Device_Capability_Descriptor, error) {
-	var desc *C.struct_libusb_ss_usb_device_capability_descriptor
-	rc := int(C.libusb_get_ss_usb_device_capability_descriptor(ctx, dev_cap.ptr, &desc))
-	if rc != 0 {
-		return nil, &libusb_error{rc}
+// ConfigDescriptorByValue gets "a USB configuration descriptor with a
+// specific bConfigurationValue. This is a non-blocking function which does not
+// involve any requests being sent to the device. (Source: libusb docs)
+func (dev *Device) ConfigDescriptorByValue(configValue int) (*ConfigDescriptor, error) {
+	var cConfig *C.struct_libusb_config_descriptor
+	err := C.libusb_get_config_descriptor_by_value(
+		dev.libusbDevice, C.uint8_t(configValue), &cConfig,
+	)
+	defer C.libusb_free_config_descriptor(cConfig)
+	if err != 0 {
+		return nil, ErrorCode(err)
 	}
-	return desc.c2go(), nil
-}
-
-func FreeSSUSBDeviceCapabilityDescriptor(ss_usb_device_cap *SS_USB_Device_Capability_Descriptor) {
-	C.libusb_free_ss_usb_device_capability_descriptor(ss_usb_device_cap.ptr)
-}
-
-func GetContainerIDDescriptor(ctx Context, dev_cap *BOS_Dev_Capability_Descriptor) (*ContainerIDDescriptor, error) {
-	var desc *C.struct_libusb_container_id_descriptor
-	rc := int(C.libusb_get_container_id_descriptor(ctx, dev_cap.ptr, &desc))
-	if rc != 0 {
-		return nil, &libusb_error{rc}
+	configuration := &ConfigDescriptor{
+		Length:               int(cConfig.bLength),
+		DescriptorType:       descriptorType(cConfig.bDescriptorType),
+		TotalLength:          uint16(cConfig.wTotalLength),
+		NumInterfaces:        int(cConfig.bNumInterfaces),
+		ConfigurationValue:   uint8(cConfig.bConfigurationValue),
+		ConfigurationIndex:   uint8(cConfig.iConfiguration),
+		Attributes:           uint8(cConfig.bmAttributes),
+		MaxPowerMilliAmperes: 2 * uint(cConfig.MaxPower), // Convert from 2 mA to just mA
+		SupportedInterfaces:  nil,
 	}
-	return desc.c2go(), nil
+	return configuration, nil
 }
 
-func FreeContainerIDDescriptor(container_id *ContainerIDDescriptor) {
-	C.libusb_free_container_id_descriptor(container_id.ptr)
+// DeviceHandle represents the libusb device handle.
+type DeviceHandle struct {
+	libusbDeviceHandle *C.libusb_device_handle
 }
 
-func GetStringDescriptorASCII(hdl DeviceHandle, desc_index uint8, data []byte) ([]byte, error) {
-	rc := int(C.libusb_get_string_descriptor_ascii(hdl, (C.uint8_t)(desc_index), (*C.uchar)(&data[0]), (C.int)(len(data))))
-	if rc < 0 {
-		return nil, &libusb_error{rc}
+// StringDescriptor retrieves a descriptor from a device.
+func (dh *DeviceHandle) StringDescriptor(
+	descIndex uint8,
+	langID uint16,
+) (string, error) {
+	var cData *C.uchar
+	length := 512
+	usberr := C.libusb_get_string_descriptor(
+		dh.libusbDeviceHandle,
+		C.uint8_t(descIndex),
+		C.uint16_t(langID),
+		cData,
+		C.int(length),
+	)
+	if usberr < 0 {
+		return "", ErrorCode(usberr)
 	}
-	return data[:rc], nil
+	data := (*C.char)(unsafe.Pointer(cData))
+	return C.GoString(data), nil
 }
 
-func GetDescriptor(hdl DeviceHandle, desc_type uint8, desc_index uint8, data []byte) ([]byte, error) {
-	rc := int(C.libusb_get_descriptor(hdl, (C.uint8_t)(desc_type), (C.uint8_t)(desc_index), (*C.uchar)(&data[0]), (C.int)(len(data))))
-	if rc < 0 {
-		return nil, &libusb_error{rc}
+// StringDescriptorASCII retrieve(s) a string descriptor in C style ASCII.
+// Wrapper around libusb_get_string_descriptor(). Uses the first language
+// supported by the device. (Source: libusb docs)
+func (dh *DeviceHandle) StringDescriptorASCII(
+	descIndex uint8,
+) (string, error) {
+	// TODO(mdr): Should the length be a constant? Why did I pick 256 bytes?
+	length := 256
+	data := make([]byte, length)
+	bytesRead, _ := C.libusb_get_string_descriptor_ascii(
+		dh.libusbDeviceHandle,
+		C.uint8_t(descIndex),
+		// Unsafe pointer -> https://stackoverflow.com/a/16376039/95592
+		(*C.uchar)(unsafe.Pointer(&data[0])),
+		C.int(length),
+	)
+	if bytesRead < 0 {
+		return "", ErrorCode(bytesRead)
 	}
-	return data[:rc], nil
+	return string(data[0:bytesRead]), nil
 }
 
-func GetStringDescriptor(hdl DeviceHandle, desc_index uint8, langid uint16, data []byte) ([]byte, error) {
-	rc := int(C.libusb_get_string_descriptor(hdl, (C.uint8_t)(desc_index), (C.uint16_t)(langid), (*C.uchar)(&data[0]), (C.int)(len(data))))
-	if rc < 0 {
-		return nil, &libusb_error{rc}
+// Close implements libusb_close to close the device handle.
+func (dh *DeviceHandle) Close() error {
+	C.libusb_close(dh.libusbDeviceHandle)
+	return nil
+}
+
+// Device implements libusb_get_device to get the underlying device for a
+// handle.
+// TODO(mdr): Determine if I actually need this function.
+// func (dh *DeviceHandle) Device() (*Device, error) {
+// }
+
+// Configuration implements the libusb_get_configuration function to
+// determine the bConfigurationValue of the currently active configuration.
+func (dh *DeviceHandle) Configuration() (int, error) {
+	var configuration *C.int
+	err := C.libusb_get_configuration(dh.libusbDeviceHandle, configuration)
+	if err != 0 {
+		return 0, ErrorCode(err)
 	}
-	return data[:rc], nil
+	return int(*configuration), nil
 }
 
-//-----------------------------------------------------------------------------
-// Device hotplug event notification
-
-// int 	libusb_hotplug_register_callback (libusb_context *ctx, libusb_hotplug_event events, libusb_hotplug_flag flags, int vendor_id, int product_id, int dev_class, libusb_hotplug_callback_fn cb_fn, void *user_data, libusb_hotplug_callback_handle *handle)
-// void 	libusb_hotplug_deregister_callback (libusb_context *ctx, libusb_hotplug_callback_handle handle)
-
-//-----------------------------------------------------------------------------
-// Asynchronous device I/O
-
-func AllocStreams(dev DeviceHandle, num_streams uint32, endpoints []byte) (int, error) {
-	rc := int(C.libusb_alloc_streams(dev, (C.uint32_t)(num_streams), (*C.uchar)(&endpoints[0]), (C.int)(len(endpoints))))
-	if rc < 0 {
-		return 0, &libusb_error{rc}
-	}
-	return rc, nil
-}
-
-func FreeStreams(dev DeviceHandle, endpoints []byte) error {
-	rc := int(C.libusb_free_streams(dev, (*C.uchar)(&endpoints[0]), (C.int)(len(endpoints))))
-	if rc != 0 {
-		return &libusb_error{rc}
+// SetConfiguration implements libusb_set_configuration to set the active
+// configuration for the device.
+func (dh *DeviceHandle) SetConfiguration(configuration int) error {
+	err := C.libusb_set_configuration(dh.libusbDeviceHandle,
+		C.int(configuration))
+	if err != 0 {
+		return ErrorCode(err)
 	}
 	return nil
 }
 
-func AllocTransfer(iso_packets int) (*Transfer, error) {
-	ptr := C.libusb_alloc_transfer((C.int)(iso_packets))
-	if ptr == nil {
-		return nil, &libusb_error{ERROR_OTHER}
-	}
-	return ptr.c2go(), nil
-}
-
-func FreeTransfer(transfer *Transfer) {
-	C.libusb_free_transfer(transfer.ptr)
-}
-
-func SubmitTransfer(transfer *Transfer) error {
-	rc := int(C.libusb_submit_transfer(transfer.go2c()))
-	if rc != 0 {
-		return &libusb_error{rc}
+// ClaimInterface implements libusb_claim_interface to claim an interface on a
+// given device handle. You must claim the interface you wish to use before you
+// can perform I/O on any of its endpoints.
+func (dh *DeviceHandle) ClaimInterface(interfaceNum int) error {
+	err := C.libusb_claim_interface(dh.libusbDeviceHandle, C.int(interfaceNum))
+	if err != 0 {
+		return ErrorCode(err)
 	}
 	return nil
 }
 
-func CancelTransfer(transfer *Transfer) error {
-	rc := int(C.libusb_cancel_transfer(transfer.go2c()))
-	if rc != 0 {
-		return &libusb_error{rc}
+// ReleaseInterface implements libusb_release_interface to release an interface
+// previously claimed with libusb_claim_interface() (i.e., ClaimInterface()).
+func (dh *DeviceHandle) ReleaseInterface(interfaceNum int) error {
+	err := C.libusb_release_interface(dh.libusbDeviceHandle, C.int(interfaceNum))
+	if err != 0 {
+		return ErrorCode(err)
 	}
 	return nil
 }
 
-func TransferSetStreamID(transfer *Transfer, stream_id uint32) {
-	C.libusb_transfer_set_stream_id(transfer.go2c(), (C.uint32_t)(stream_id))
-}
-
-func TransferGetStream_ID(transfer *Transfer) uint32 {
-	return uint32(C.libusb_transfer_get_stream_id(transfer.go2c()))
-}
-
-func ControlTransferGetData(transfer *Transfer) *byte {
-	// should this return a slice? - what's the length?
-	return (*byte)(C.libusb_control_transfer_get_data(transfer.go2c()))
-}
-
-// static struct libusb_control_setup * 	libusb_control_transfer_get_setup (struct libusb_transfer *transfer)
-// static void 	libusb_fill_control_setup (unsigned char *buffer, uint8_t bmRequestType, uint8_t bRequest, uint16_t wValue, uint16_t wIndex, uint16_t wLength)
-// static void 	libusb_fill_control_transfer (struct libusb_transfer *transfer, libusb_device_handle *dev_handle, unsigned char *buffer, libusb_transfer_cb_fn callback, void *user_data, unsigned int timeout)
-// static void 	libusb_fill_bulk_transfer (struct libusb_transfer *transfer, libusb_device_handle *dev_handle, unsigned char endpoint, unsigned char *buffer, int length, libusb_transfer_cb_fn callback, void *user_data, unsigned int timeout)
-// static void 	libusb_fill_bulk_stream_transfer (struct libusb_transfer *transfer, libusb_device_handle *dev_handle, unsigned char endpoint, uint32_t stream_id, unsigned char *buffer, int length, libusb_transfer_cb_fn callback, void *user_data, unsigned int timeout)
-// static void 	libusb_fill_interrupt_transfer (struct libusb_transfer *transfer, libusb_device_handle *dev_handle, unsigned char endpoint, unsigned char *buffer, int length, libusb_transfer_cb_fn callback, void *user_data, unsigned int timeout)
-// static void 	libusb_fill_iso_transfer (struct libusb_transfer *transfer, libusb_device_handle *dev_handle, unsigned char endpoint, unsigned char *buffer, int length, int num_iso_packets, libusb_transfer_cb_fn callback, void *user_data, unsigned int timeout)
-// static void 	libusb_set_iso_packet_lengths (struct libusb_transfer *transfer, unsigned int length)
-// static unsigned char * 	libusb_get_iso_packet_buffer (struct libusb_transfer *transfer, unsigned int packet)
-// static unsigned char * 	libusb_get_iso_packet_buffer_simple (struct libusb_transfer *transfer, unsigned int packet)
-
-//-----------------------------------------------------------------------------
-// Polling and timing
-
-// int 	libusb_try_lock_events (libusb_context *ctx)
-// void 	libusb_lock_events (libusb_context *ctx)
-// void 	libusb_unlock_events (libusb_context *ctx)
-// int 	libusb_event_handling_ok (libusb_context *ctx)
-// int 	libusb_event_handler_active (libusb_context *ctx)
-// void 	libusb_lock_event_waiters (libusb_context *ctx)
-// void 	libusb_unlock_event_waiters (libusb_context *ctx)
-// int 	libusb_wait_for_event (libusb_context *ctx, struct timeval *tv)
-// int 	libusb_handle_events_timeout_completed (libusb_context *ctx, struct timeval *tv, int *completed)
-// int 	libusb_handle_events_timeout (libusb_context *ctx, struct timeval *tv)
-// int 	libusb_handle_events (libusb_context *ctx)
-// int 	libusb_handle_events_completed (libusb_context *ctx, int *completed)
-// int 	libusb_handle_events_locked (libusb_context *ctx, struct timeval *tv)
-// int 	libusb_pollfds_handle_timeouts (libusb_context *ctx)
-// int 	libusb_get_next_timeout (libusb_context *ctx, struct timeval *tv)
-// void 	libusb_set_pollfd_notifiers (libusb_context *ctx, libusb_pollfd_added_cb added_cb, libusb_pollfd_removed_cb removed_cb, void *user_data)
-// const struct libusb_pollfd ** 	libusb_get_pollfds (libusb_context *ctx)
-// void 	libusb_free_pollfds (const struct libusb_pollfd **pollfds)
-
-//-----------------------------------------------------------------------------
-// Synchronous device I/O
-
-func ControlTransfer(hdl DeviceHandle, bmRequestType uint8, bRequest uint8, wValue uint16, wIndex uint16, data []byte, timeout uint) ([]byte, error) {
-	rc := int(C.libusb_control_transfer(hdl, (C.uint8_t)(bmRequestType), (C.uint8_t)(bRequest), (C.uint16_t)(wValue), (C.uint16_t)(wIndex),
-		(*C.uchar)(&data[0]), (C.uint16_t)(len(data)), (C.uint)(timeout)))
-	if rc < 0 {
-		return nil, &libusb_error{rc}
+// SetInterfaceAltSetting activates an alternate setting for an interface.
+func (dh *DeviceHandle) SetInterfaceAltSetting(
+	interfaceNum int,
+	alternateSetting int,
+) error {
+	err := C.libusb_set_interface_alt_setting(
+		dh.libusbDeviceHandle,
+		C.int(interfaceNum),
+		C.int(alternateSetting),
+	)
+	if err != 0 {
+		return ErrorCode(err)
 	}
-	return data[:rc], nil
+	return nil
 }
 
-func BulkTransfer(hdl DeviceHandle, endpoint uint8, data []byte, timeout uint) ([]byte, error) {
+// FIXME(mdr): libusb_clear_halt takes an endpoint as an unsigned char. Need to
+// determine, what I should pass into this function as the endpoint.
+// func (dh *DeviceHandle) ClearHalt(endpoint int) error {
+// return nil
+// }
+
+// ResetDevice implements libusb_reset_device to perform a USB port reset to
+// reinitialize a device.
+func (dh *DeviceHandle) ResetDevice() error {
+	err := C.libusb_reset_device(dh.libusbDeviceHandle)
+	if err != 0 {
+		return ErrorCode(err)
+	}
+	return nil
+}
+
+// KernelDriverActive implements libusb_kernel_driver_active to determine if a
+// kernel driver is active on an interface.
+func (dh *DeviceHandle) KernelDriverActive(interfaceNum int) (bool, error) {
+	ret := C.libusb_kernel_driver_active(
+		dh.libusbDeviceHandle, C.int(interfaceNum))
+	if ret == 1 {
+		return true, nil
+	} else if ret != 0 {
+		return false, ErrorCode(ret)
+	}
+	return false, nil
+}
+
+// DetachKernelDriver implements libusb_detach_kernel_driver to detach a kernel
+// driver from an interface.
+func (dh *DeviceHandle) DetachKernelDriver(interfaceNum int) error {
+	err := C.libusb_detach_kernel_driver(
+		dh.libusbDeviceHandle, C.int(interfaceNum))
+	if err != 0 {
+		return ErrorCode(err)
+	}
+	return nil
+}
+
+// AttachKernelDriver implements libusb_attach_kernel_driver to re-attach an
+// interface's kernel driver, which was previously detached using
+// libusb_detach_kernel_driver().
+func (dh *DeviceHandle) AttachKernelDriver(interfaceNum int) error {
+	err := C.libusb_attach_kernel_driver(
+		dh.libusbDeviceHandle, C.int(interfaceNum))
+	if err != 0 {
+		return ErrorCode(err)
+	}
+	return nil
+}
+
+// SetAutoDetachKernelDriver implements libusb_set_auto_detach_kernel_driver to
+// enable/disable libusb's automatic kernel driver detachment.
+func (dh *DeviceHandle) SetAutoDetachKernelDriver(enable bool) error {
+	cEnable := C.int(0)
+	if enable {
+		cEnable = C.int(1)
+	}
+	err := C.libusb_set_auto_detach_kernel_driver(dh.libusbDeviceHandle, cEnable)
+	if err != 0 {
+		return ErrorCode(err)
+	}
+	return nil
+}
+
+// SpeedType provides the USB speed type.
+type SpeedType int
+
+const (
+	speedUnknown SpeedType = C.LIBUSB_SPEED_UNKNOWN
+	speedLow     SpeedType = C.LIBUSB_SPEED_LOW
+	speedFull    SpeedType = C.LIBUSB_SPEED_FULL
+	speedHigh    SpeedType = C.LIBUSB_SPEED_HIGH
+	speedSuper   SpeedType = C.LIBUSB_SPEED_SUPER
+)
+
+var speedCodes = map[SpeedType]string{
+	speedUnknown: "The OS doesn't report or know the device speed.",
+	speedLow:     "The device is operating at low speed (1.5MBit/s)",
+	speedFull:    "The device is operating at full speed (12MBit/s)",
+	speedHigh:    "The device is operating at high speed (480MBit/s)",
+	speedSuper:   "The device is operating at super speed (5000MBit/s)",
+}
+
+func (speed SpeedType) String() string {
+	return speedCodes[speed]
+}
+
+type supportedSpeed int
+
+const (
+	lowSpeedOperation   supportedSpeed = C.LIBUSB_LOW_SPEED_OPERATION
+	fullSpeedOperation  supportedSpeed = C.LIBUSB_FULL_SPEED_OPERATION
+	highSpeedOperation  supportedSpeed = C.LIBUSB_HIGH_SPEED_OPERATION
+	superSpeedOperation supportedSpeed = C.LIBUSB_SUPER_SPEED_OPERATION
+)
+
+var supportedSpeeds = map[supportedSpeed]string{
+	lowSpeedOperation:   "Low speed operation supported (1.5MBit/s).",
+	fullSpeedOperation:  "Full speed operation supported (12MBit/s).",
+	highSpeedOperation:  "High speed operation supported (480MBit/s).",
+	superSpeedOperation: "Superspeed operation supported (5000MBit/s).",
+}
+
+func (speed supportedSpeed) String() string {
+	return supportedSpeeds[speed]
+}
+
+// BulkTransfer implements libusb_bulk_transfer to perform a USB bulk transfer.
+func (dh *DeviceHandle) BulkTransfer(
+	endpoint endpointAddress,
+	data []byte,
+	length int,
+	timeout int,
+) (int, error) {
 	var transferred C.int
-	rc := int(C.libusb_bulk_transfer(hdl, (C.uchar)(endpoint), (*C.uchar)(&data[0]), (C.int)(len(data)), &transferred, (C.uint)(timeout)))
-	if rc != 0 {
-		return nil, &libusb_error{rc}
+	err := C.libusb_bulk_transfer(
+		dh.libusbDeviceHandle,
+		C.uchar(endpoint),
+		(*C.uchar)(unsafe.Pointer(&data[0])),
+		C.int(length),
+		&transferred,
+		C.uint(timeout),
+	)
+	if err != 0 {
+		return 0, ErrorCode(err)
 	}
-	return data[:int(transferred)], nil
+	return int(transferred), nil
 }
 
-func InterruptTransfer(hdl DeviceHandle, endpoint uint8, data []byte, timeout uint) ([]byte, error) {
-	var transferred C.int
-	rc := int(C.libusb_interrupt_transfer(hdl, (C.uchar)(endpoint), (*C.uchar)(&data[0]), (C.int)(len(data)), &transferred, (C.uint)(timeout)))
-	if rc != 0 {
-		return nil, &libusb_error{rc}
+// BulkTransferOut is a helper method that performs a USB bulk output transfer.
+func (dh *DeviceHandle) BulkTransferOut(
+	endpoint endpointAddress,
+	data []byte,
+	timeout int,
+) (int, error) {
+	return dh.BulkTransfer(
+		endpoint,
+		data,
+		len(data),
+		timeout,
+	)
+}
+
+// BulkTransferIn is a helper method that performs a USB bulk input transfer.
+func (dh *DeviceHandle) BulkTransferIn(
+	endpoint endpointAddress,
+	maxReceiveBytes int,
+	timeout int,
+) ([]byte, int, error) {
+	data := make([]byte, maxReceiveBytes)
+	transferred, err := dh.BulkTransfer(
+		endpoint,
+		data,
+		maxReceiveBytes,
+		timeout,
+	)
+	if err != nil {
+		return nil, 0, err
 	}
-	return data[:int(transferred)], nil
+	return data, int(transferred), nil
+}
+
+// ControlTransfer sends a transfer using a control endpoint for the given
+// device handle.
+func (dh *DeviceHandle) ControlTransfer(
+	requestType byte,
+	request byte,
+	value uint16,
+	index uint16,
+	data []byte,
+	length int,
+	timeout int,
+) (int, error) {
+	ret := C.libusb_control_transfer(
+		dh.libusbDeviceHandle,
+		C.uint8_t(requestType),
+		C.uint8_t(request),
+		C.uint16_t(value),
+		C.uint16_t(index),
+		(*C.uchar)(unsafe.Pointer(&data[0])),
+		C.uint16_t(length),
+		C.uint(timeout),
+	)
+	if ret < 0 {
+		return 0, ErrorCode(ret)
+	}
+	return int(ret), nil
+}
+
+// InterruptTransfer performs a USB interrupt transfer.
+func (dh *DeviceHandle) InterruptTransfer(
+	endpoint endpointAddress,
+	data []byte,
+	length int,
+	timeout int,
+) (int, error) {
+	var transferred C.int
+	err := C.libusb_interrupt_transfer(
+		dh.libusbDeviceHandle,
+		C.uchar(endpoint),
+		(*C.uchar)(unsafe.Pointer(&data[0])),
+		C.int(length),
+		&transferred,
+		C.uint(timeout),
+	)
+	if err != 0 {
+		return 0, ErrorCode(err)
+	}
+	return int(transferred), nil
 }

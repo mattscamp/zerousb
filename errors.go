@@ -20,46 +20,52 @@ import (
 )
 
 // #include "./libusb/libusb/libusb.h"
+// static inline const char* libusb_strerror_wrapper (int code) {
+// 	return libusb_strerror(code);
+// }
 import "C"
 
-// libusbError is an Error code from libusb.
-type libusbError C.int
+// ErrorCode is the type for the libusb_error C enum.
+type ErrorCode int
 
-// Error implements the Error interface.
-func (e libusbError) Error() string {
-	return fmt.Sprintf("libusb: %s [code %d]", libusbErrorString[e], e)
+// Error implements the Go error interface for ErrorCode.
+func (err ErrorCode) Error() string {
+	return fmt.Sprintf("%v: %v",
+		ErrorName(err),
+		StrError(err),
+	)
+}
+
+// ErrorName implements the libusb_error_name function.
+func ErrorName(err ErrorCode) string {
+	return C.GoString(C.libusb_error_name(C.int(err)))
+}
+
+// StrError implements the libusb_strerror function.
+func StrError(err ErrorCode) string {
+	return C.GoString(C.libusb_strerror_wrapper(C.int(err)))
 }
 
 const (
-	ErrSuccess      libusbError = C.LIBUSB_SUCCESS
-	ErrIO           libusbError = C.LIBUSB_ERROR_IO
-	ErrInvalidParam libusbError = C.LIBUSB_ERROR_INVALID_PARAM
-	ErrAccess       libusbError = C.LIBUSB_ERROR_ACCESS
-	ErrNoDevice     libusbError = C.LIBUSB_ERROR_NO_DEVICE
-	ErrNotFound     libusbError = C.LIBUSB_ERROR_NOT_FOUND
-	ErrBusy         libusbError = C.LIBUSB_ERROR_BUSY
-	ErrTimeout      libusbError = C.LIBUSB_ERROR_TIMEOUT
-	ErrOverflow     libusbError = C.LIBUSB_ERROR_OVERFLOW
-	ErrPipe         libusbError = C.LIBUSB_ERROR_PIPE
-	ErrIntErrupted  libusbError = C.LIBUSB_ERROR_INTERRUPTED
-	ErrNoMem        libusbError = C.LIBUSB_ERROR_NO_MEM
-	ErrNotSupported libusbError = C.LIBUSB_ERROR_NOT_SUPPORTED
-	ErrOther        libusbError = C.LIBUSB_ERROR_OTHER
-)
+	success           ErrorCode = C.LIBUSB_SUCCESS
+	errorIo           ErrorCode = C.LIBUSB_ERROR_IO
+	errorInvalidParam ErrorCode = C.LIBUSB_ERROR_INVALID_PARAM
+	errorAccess       ErrorCode = C.LIBUSB_ERROR_ACCESS
+	errorNoDevice     ErrorCode = C.LIBUSB_ERROR_NO_DEVICE
+	errorNotFound     ErrorCode = C.LIBUSB_ERROR_NOT_FOUND
+	errorBusy         ErrorCode = C.LIBUSB_ERROR_BUSY
+	errorTimeout      ErrorCode = C.LIBUSB_ERROR_TIMEOUT
+	errorOverflow     ErrorCode = C.LIBUSB_ERROR_OVERFLOW
+	errorPipe         ErrorCode = C.LIBUSB_ERROR_PIPE
+	errorInterrupted  ErrorCode = C.LIBUSB_ERROR_INTERRUPTED
+	errorNoMem        ErrorCode = C.LIBUSB_ERROR_NO_MEM
+	errorNotSupported ErrorCode = C.LIBUSB_ERROR_NOT_SUPPORTED
+	errorOther        ErrorCode = C.LIBUSB_ERROR_OTHER
 
-var libusbErrorString = map[libusbError]string{
-	ErrSuccess:      "success",
-	ErrIO:           "i/o Error",
-	ErrInvalidParam: "invalid param",
-	ErrAccess:       "bad access",
-	ErrNoDevice:     "no device",
-	ErrNotFound:     "not found",
-	ErrBusy:         "device or resource busy",
-	ErrTimeout:      "timeout",
-	ErrOverflow:     "overflow",
-	ErrPipe:         "pipe Error",
-	ErrIntErrupted:  "intErrupted",
-	ErrNoMem:        "out of memory",
-	ErrNotSupported: "not supported",
-	ErrOther:        "unknown Error",
-}
+	errorTransferError    ErrorCode = C.LIBUSB_TRANSFER_ERROR
+	errorTransferTimedOut ErrorCode = C.LIBUSB_TRANSFER_TIMED_OUT
+	errorTransferCanceled ErrorCode = C.LIBUSB_TRANSFER_CANCELLED
+	errorTransferStall    ErrorCode = C.LIBUSB_TRANSFER_STALL
+	errorTransferNoDevice ErrorCode = C.LIBUSB_TRANSFER_NO_DEVICE
+	errorTransferOverflow ErrorCode = C.LIBUSB_TRANSFER_OVERFLOW
+)

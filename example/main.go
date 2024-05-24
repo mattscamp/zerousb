@@ -9,33 +9,22 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const ExampleVendorId = zerousb.ID(0x0483)
-const ExampleProductId = zerousb.ID(0xa27e)
-const ExampleReadEndpointAddress = 0x81
-const ExampleWriteEndpointAddress = 0x3
-const ExampleInterfaceAddress = 0x1
-
-var ExampleConfigAddress = uint8(0x1)
+const ExampleVendorId = uint16(0x0483)
+const ExampleProductId = uint16(0xa27e)
 
 func main() {
 	// Enumerate over all connected devices
 	zerousb, err := zerousb.New(zerousb.Options{
-		InterfaceAddress: ExampleInterfaceAddress,
-		EpInAddress:      ExampleReadEndpointAddress,
-		EpOutAddress:     ExampleWriteEndpointAddress,
-		EpInType:         zerousb.TRANSFER_TYPE_BULK,
-		EpOutType:        zerousb.TRANSFER_TYPE_BULK,
+		LogLevel: zerousb.LogLevelDebug,
 	}, logrus.New())
 	if err != nil {
 		panic(err)
 	}
 
-	device, err := zerousb.Connect(ExampleVendorId, ExampleProductId, false)
+	device, err := zerousb.Connect("Aillio Bullet R1", ExampleVendorId, ExampleProductId)
 	if err != nil {
 		panic(err)
 	}
-
-	fmt.Printf("%v\n", device.Details())
 
 	wrote, err := device.Write([]byte{0x30, 0x02})
 	if err != nil {
@@ -43,8 +32,7 @@ func main() {
 	}
 
 	fmt.Printf("Wrote: %v\n", wrote)
-	buf := make([]byte, 32)
-	readRes, err := device.Read(buf, 0)
+	readRes, err := device.Read(32, 0)
 	if err != nil {
 		panic(err)
 	}

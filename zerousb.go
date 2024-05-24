@@ -33,13 +33,7 @@ const (
 )
 
 type Options struct {
-	InterfaceAddress uint8
-	ConfigAddress    *uint8
-	EpInAddress      byte
-	EpOutAddress     byte
-	EpInType         int
-	EpOutType        int
-	Debug            *bool
+	LogLevel LogLevel
 }
 
 type ZeroUSB struct {
@@ -52,25 +46,30 @@ type ZeroUSB struct {
 }
 
 type ZeroUSBDevice struct {
-	dev     *Device
-	options Options
-	logger  *logrus.Logger
-	closed  int32 // atomic
-	lock    sync.Mutex
-	attach  bool
-	handle  *DeviceHandle
+	dev                *Device
+	options            Options
+	logger             *logrus.Logger
+	closed             int32 // atomic
+	lock               sync.Mutex
+	attach             bool
+	handle             *DeviceHandle
+	reader             *endpointAddress
+	readerTransferType TransferType
+	writerTransferType TransferType
+	writer             *endpointAddress
+	ifaceNum           int
 }
 
 func New(options Options, logger *logrus.Logger) (*ZeroUSB, error) {
-	var usb Context
-
-	err := Init(&usb)
+	usbCtx, err := NewContext()
 	if err != nil {
-		return nil, fmt.Errorf(`[zerousb] error when initializing zerousb. %v \n`, err)
+		return nil, err
 	}
 
+	usbCtx.SetDebug(options.LogLevel)
+
 	return &ZeroUSB{
-		usbContext: &usb,
+		usbContext: usbCtx,
 		options:    options,
 		canDetach:  runtime.GOOS != "windows",
 		logger:     logger,
@@ -79,7 +78,7 @@ func New(options Options, logger *logrus.Logger) (*ZeroUSB, error) {
 
 func (b *ZeroUSB) Close() {
 	if b.usbContext != nil {
-		Exit(*b.usbContext)
+		b.usbContext.Close()
 	}
 }
 
@@ -101,61 +100,6 @@ func (b *ZeroUSB) Warn(msg string) {
 	}
 }
 
-func (b *ZeroUSB) Connect(vendorID ID, productID ID, reset bool) (*ZeroUSBDevice, error) {
-	if b.usbContext == nil {
-		return nil, errors.New("No context. Initialize ZeroUSB.")
-	}
-
-	handle := OpenDeviceWithVIDPID(*b.usbContext, uint16(vendorID), uint16(productID))
-	if handle == nil {
-		return nil, errors.New("Unable to open. Device not found.")
-	}
-
-	if b.canDetach {
-		err := DetachKernelDriver(*handle, int(b.options.InterfaceAddress))
-		if err != nil {
-			b.Warn(fmt.Sprintf("detach of kernal driver failed: %s", err.Error()))
-			// Fail softly. This is a newer MacOS feature any may not work everywhere.
-		}
-	}
-
-	if b.options.ConfigAddress != nil {
-		err := SetConfiguration(*handle, int(*b.options.ConfigAddress))
-		if err != nil {
-			b.Error(fmt.Sprint("setting active config descriptor failed"))
-			Close(*handle)
-			b.Close()
-			return nil, err
-		}
-	}
-
-	dev := GetDevice(*handle)
-	configDescriptor, err := GetActiveConfigDescriptor(dev)
-	if err != nil {
-		b.Error(fmt.Sprint("getting active config descriptor failed"))
-		Close(*handle)
-		b.Close()
-		return nil, err
-	}
-
-	defer FreeConfigDescriptor(configDescriptor)
-
-	err = ClaimInterface(*handle, int(b.options.InterfaceAddress))
-	if err != nil {
-		b.Error(fmt.Sprint("claiming interface failed"))
-		Close(*handle)
-		b.Close()
-		return nil, err
-	}
-
-	return &ZeroUSBDevice{
-		dev:     &dev,
-		options: b.options,
-		logger:  b.logger,
-		handle:  handle,
-	}, nil
-}
-
 func (b *ZeroUSBDevice) Log(msg string) {
 	if b.logger != nil {
 		b.logger.Info(fmt.Sprintf("[zerousb] %s \n", msg))
@@ -174,90 +118,175 @@ func (b *ZeroUSBDevice) Warn(msg string) {
 	}
 }
 
+func (b *ZeroUSB) Connect(name string, vendorID, productID uint16) (*ZeroUSBDevice, error) {
+	if b.usbContext == nil {
+		return nil, errors.New("No context. Initialize ZeroUSB.")
+	}
+
+	var device *ZeroUSBDevice
+
+	b.Log(fmt.Sprintf("[zerousb] Attempting to open device: %s \n", name))
+
+	// attempt to find the device on the OS
+	usbDevice, usbDeviceHandle, err := b.usbContext.OpenDeviceWithVendorProduct(vendorID, productID)
+	if err != nil {
+		b.Error(fmt.Sprintf("[zerousb] Failed to find device %s (%v) \n", name, err))
+		return nil, errors.New("Unable to find device.")
+	}
+
+	activeCfg, err := usbDevice.ActiveConfigDescriptor()
+	if err != nil {
+		b.Error(fmt.Sprintf("[zerousb] Failed get active config for %s (%v) \n", name, err))
+		return nil, errors.New("Unable to get active config")
+	}
+
+	// we found a device, now let's figure out if it is supported
+	ifaces := activeCfg.SupportedInterfaces
+	for _, iface := range ifaces {
+		if iface.NumAltSettings == 0 {
+			continue
+		}
+
+		for _, alt := range iface.InterfaceDescriptors {
+			// Skip HID interfaces, they are handled directly by OS libraries
+			if alt.InterfaceClass == uint8(hid) {
+				continue
+			}
+
+			var reader, writer *endpointAddress
+			var readerTransferType, writerTransferType TransferType
+
+			for _, end := range alt.EndpointDescriptors {
+				// Skip any non-bulk endpoints
+				if end.Attributes.transferType() != BulkTransfer {
+					continue
+				}
+
+				if end.Direction() == endpointIn {
+					reader = &end.EndpointAddress
+					readerTransferType = end.TransferType()
+				} else if end.Direction() == endpointOut {
+					writer = &end.EndpointAddress
+					writerTransferType = end.TransferType()
+				}
+			}
+
+			// If both in and out interrupts are available, match the device
+			if reader != nil && writer != nil {
+				usbDeviceDescriptor, _ := usbDevice.DeviceDescriptor()
+				if err != nil {
+					b.Error(fmt.Sprintf("[zerousb] Failed opening %s (%v \n", name, err))
+					return nil, errors.New("Failed to open device.")
+				}
+
+				serialnum, _ := usbDeviceHandle.StringDescriptorASCII(usbDeviceDescriptor.SerialNumberIndex)
+				manufacturer, _ := usbDeviceHandle.StringDescriptorASCII(usbDeviceDescriptor.ManufacturerIndex)
+				product, _ := usbDeviceHandle.StringDescriptorASCII(usbDeviceDescriptor.ProductIndex)
+				b.Log(fmt.Sprintf("[zerousb] Found %v %v S/N %s using Vendor ID %v and Product ID %v\n",
+					manufacturer,
+					product,
+					serialnum,
+					vendorID,
+					productID,
+				))
+				device = &ZeroUSBDevice{
+					dev:                usbDevice,
+					options:            b.options,
+					logger:             b.logger,
+					handle:             usbDeviceHandle,
+					reader:             reader,
+					writer:             writer,
+					readerTransferType: readerTransferType,
+					writerTransferType: writerTransferType,
+					ifaceNum:           alt.InterfaceNumber,
+				}
+			}
+		}
+	}
+
+	if device == nil {
+		// we could not find a device
+		b.Error(fmt.Sprintf("[zerousb] Failed to find device %s \n", name))
+		return nil, errors.New("Failed to find device.")
+	}
+
+	if b.canDetach {
+		err := usbDeviceHandle.DetachKernelDriver(device.ifaceNum)
+		if err != nil {
+			b.Warn(fmt.Sprintf("detach of kernal driver failed: %s", err.Error()))
+			// Fail softly. This is a newer MacOS feature any may not work everywhere.
+		}
+	}
+
+	err = usbDeviceHandle.ClaimInterface(device.ifaceNum)
+	if err != nil {
+		b.Error(fmt.Sprintf("[zerousb] Failed to claim interface number %d: %v \n", device.ifaceNum, err))
+		return nil, errors.New("Error claiming interface.")
+	}
+
+	return device, nil
+}
+
 func (d *ZeroUSBDevice) Close(disconnected bool) error {
 	if !disconnected {
 		d.ClearBuffer()
 	}
 
-	err := ReleaseInterface(*d.handle, int(d.options.InterfaceAddress))
+	err := d.handle.ReleaseInterface(d.ifaceNum)
 	if err != nil {
 		d.Error(fmt.Sprintf("error at releasing interface: %s", err))
 	}
 
-	Close(*d.handle)
+	d.handle.Close()
 
 	return nil
 }
 
 func (d *ZeroUSBDevice) ClearBuffer() {
 	var err error
-	var buf [64]byte
 
 	for err == nil {
-		_, err = d.readWrite(buf[:], d.options.EpInAddress, &d.lock, 50, true)
+		_, err = d.Read(64, 50)
 	}
 }
 
-func (d *ZeroUSBDevice) readWrite(buf []byte, endpoint byte, mutex sync.Locker, timeout uint, ignoreErrors bool) (int, error) {
-	var p []byte
-	var err error
-
-	if d.options.EpInAddress == endpoint && d.options.EpInType == TRANSFER_TYPE_BULK {
-		p, err = BulkTransfer(*d.handle, endpoint, buf, uint(timeout))
-	}
-
-	if d.options.EpInAddress == endpoint && d.options.EpInType == TRANSFER_TYPE_INTERRUPT {
-		p, err = InterruptTransfer(*d.handle, endpoint, buf, uint(timeout))
-	}
-
-	if d.options.EpOutAddress == endpoint && d.options.EpOutType == TRANSFER_TYPE_BULK {
-		p, err = BulkTransfer(*d.handle, endpoint, buf, uint(timeout))
-	}
-
-	if d.options.EpOutAddress == endpoint && d.options.EpOutType == TRANSFER_TYPE_INTERRUPT {
-		p, err = InterruptTransfer(*d.handle, endpoint, buf, uint(timeout))
-	}
-
-	if err != nil {
-		if isErrorDisconnect(err) {
-			return 0, ErrDeviceDisconnected
-		} else if !ignoreErrors {
-			d.Error(fmt.Sprintf("error seen in r/w: %s. Buffer: %b. Endpoint: %v. Res: %+v", err.Error(), buf, endpoint, len(p)))
-			ResetDevice(*d.handle)
-		}
-
-		return 0, err
-	}
-	return len(p), err
-}
-
-func isErrorDisconnect(err error) bool {
-	return (err.Error() == ErrorName(int(ERROR_IO)) ||
-		err.Error() == ErrorName(int(ERROR_NO_DEVICE)) ||
-		err.Error() == ErrorName(int(ERROR_OTHER)) ||
-		err.Error() == ErrorName(int(ERROR_PIPE)))
-}
-
-func (d *ZeroUSBDevice) Details() *DeviceDescriptor {
-	desc, _ := GetDeviceDescriptor(*d.dev)
-	return desc
+func IsErrorDisconnect(err error) bool {
+	return (err.Error() == ErrorName(errorIo) ||
+		err.Error() == ErrorName(errorNoDevice) ||
+		err.Error() == ErrorName(errorOther) ||
+		err.Error() == ErrorName(errorPipe))
 }
 
 func (d *ZeroUSBDevice) Write(buf []byte) (int, error) {
-	if d.options.Debug != nil && *d.options.Debug == true {
+	if d.writer == nil {
+		return 0, fmt.Errorf("Attempt to write before opening connection.")
+	}
+
+	if d.options.LogLevel == LogLevelDebug {
 		d.Log(fmt.Sprintf("DEBUG. Write. %+v \n", buf))
 	}
 
-	return d.readWrite(buf, d.options.EpOutAddress, &d.lock, 0, false)
+	return d.handle.BulkTransferOut(*d.writer, buf, 500)
 }
 
-func (d *ZeroUSBDevice) Read(buf []byte, timeout int) (int, error) {
-	if d.options.Debug != nil && *d.options.Debug == true {
-		d.Log(fmt.Sprintf("DEBUG. Read. %+v \n", buf))
+func (d *ZeroUSBDevice) Read(length int, timeout int) ([]byte, error) {
+	if d.writer == nil {
+		return []byte{}, fmt.Errorf("Attempt to read before opening connection.")
 	}
+
+	if d.options.LogLevel == LogLevelDebug {
+		d.Log(fmt.Sprintf("DEBUG. Read. %+v \n", length))
+	}
+
 	// default read timeout
 	if timeout == 0 {
 		timeout = 5000
 	}
-	return d.readWrite(buf, d.options.EpInAddress, &d.lock, uint(timeout), false)
+
+	readRes, _, err := d.handle.BulkTransferIn(*d.reader, length, timeout)
+	if err != nil {
+		return nil, err
+	}
+
+	return readRes, nil
 }
