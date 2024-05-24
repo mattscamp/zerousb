@@ -1,4 +1,4 @@
-module github.com/mattscamp/zerousb
+module github.com/mattscamp/zerousb/v2
 
 go 1.22
 
