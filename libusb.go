@@ -59,9 +59,9 @@ extern void goLibusbLog(const char *s);
 #endif
 
 */
-// int set_debug(libusb_context * ctx, int level) {
+// void set_debug(libusb_context * ctx, int level) {
 // #if HAVE_LIBUSB_SET_OPTION
-//    return libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, level);
+//    libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, level);
 // #else
 //    libusb_set_debug(ctx, LIBUSB_LOG_LEVEL_INFO);
 // #endif
