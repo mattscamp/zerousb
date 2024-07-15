@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 
 	"github.com/sirupsen/logrus"
@@ -251,10 +252,10 @@ func (d *ZeroUSBDevice) ClearBuffer() {
 }
 
 func IsErrorDisconnect(err error) bool {
-	return (err.Error() == ErrorName(errorIo) ||
-		err.Error() == ErrorName(errorNoDevice) ||
-		err.Error() == ErrorName(errorOther) ||
-		err.Error() == ErrorName(errorPipe))
+	return (strings.Contains(err.Error(), ErrorName(errorIo)) ||
+		strings.Contains(err.Error(), ErrorName(errorNoDevice)) ||
+		strings.Contains(err.Error(), ErrorName(errorOther)) ||
+		strings.Contains(err.Error(), ErrorName(errorPipe)))
 }
 
 func (d *ZeroUSBDevice) Write(buf []byte) (int, error) {
