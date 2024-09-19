@@ -34,6 +34,17 @@ const (
 	usbConfigIndex = 0
 )
 
+type VendorAndProduct struct {
+	VendorId   uint16
+	ProductId  uint16
+	Identifier *string
+}
+
+type DeviceWithId struct {
+	Identifier *string
+	Device     *Device
+}
+
 type Options struct {
 	LogLevel LogLevel
 }
@@ -50,6 +61,7 @@ type ZeroUSB struct {
 }
 
 type ZeroUSBDevice struct {
+	identifier         *string
 	dev                *Device
 	options            Options
 	logger             *logrus.Logger
@@ -122,13 +134,13 @@ func (b *ZeroUSBDevice) Warn(msg string) {
 	}
 }
 
-func hasVendorIDAndProductID(ids [][]uint16, lookup []uint16) bool {
-	for _, vendorAndProductID := range ids {
-		if lookup[0] == vendorAndProductID[0] && lookup[1] == vendorAndProductID[1] {
-			return true
+func indexOfVendorIDAndProductID(ids []VendorAndProduct, lookup []uint16) *int {
+	for i, vendorAndProductID := range ids {
+		if lookup[0] == vendorAndProductID.VendorId && lookup[1] == vendorAndProductID.ProductId {
+			return &i
 		}
 	}
-	return false
+	return nil
 }
 
 func (b *ZeroUSB) Get() (*ZeroUSBDevice, error) {
@@ -147,7 +159,7 @@ func (b *ZeroUSB) EndWatch() {
 	b.endWatcher <- true
 }
 
-func (b *ZeroUSB) Watch(vendorAndProductIDs [][]uint16) error {
+func (b *ZeroUSB) Watch(vendorAndProductIDs []VendorAndProduct) error {
 	if b.usbContext == nil {
 		return errors.New("No context. Initialize ZeroUSB.")
 	}
@@ -167,19 +179,15 @@ func (b *ZeroUSB) Watch(vendorAndProductIDs [][]uint16) error {
 					b.endWatcher <- true
 				}
 
-				if b.currentConnectedDevice != nil {
-				}
-
-				watchedAndConnectedDevices := []*Device{}
-
+				watchedAndConnectedDevices := []DeviceWithId{}
 				// Get all watched devices
 				for _, device := range connectedDevices {
-					isWatchingForDevice := hasVendorIDAndProductID(vendorAndProductIDs, []uint16{
+					indexOfWatchedDevice := indexOfVendorIDAndProductID(vendorAndProductIDs, []uint16{
 						uint16(device.libusbDevice.device_descriptor.idVendor),
 						uint16(device.libusbDevice.device_descriptor.idProduct),
 					})
-					if isWatchingForDevice {
-						watchedAndConnectedDevices = append(watchedAndConnectedDevices, device)
+					if indexOfWatchedDevice != nil {
+						watchedAndConnectedDevices = append(watchedAndConnectedDevices, DeviceWithId{Identifier: vendorAndProductIDs[*indexOfWatchedDevice].Identifier, Device: device})
 					}
 				}
 
@@ -187,8 +195,8 @@ func (b *ZeroUSB) Watch(vendorAndProductIDs [][]uint16) error {
 				shouldDisconnect := true
 				if b.currentConnectedDevice != nil {
 					for _, device := range watchedAndConnectedDevices {
-						if b.currentConnectedDevice.handle.libusbDeviceHandle.dev.device_descriptor.idVendor == device.libusbDevice.device_descriptor.idVendor &&
-							b.currentConnectedDevice.handle.libusbDeviceHandle.dev.device_descriptor.idProduct == device.libusbDevice.device_descriptor.idProduct {
+						if b.currentConnectedDevice.handle.libusbDeviceHandle.dev.device_descriptor.idVendor == device.Device.libusbDevice.device_descriptor.idVendor &&
+							b.currentConnectedDevice.handle.libusbDeviceHandle.dev.device_descriptor.idProduct == device.Device.libusbDevice.device_descriptor.idProduct {
 							// Our current reference is both connected and a watched device
 							shouldDisconnect = false
 							break
@@ -200,9 +208,7 @@ func (b *ZeroUSB) Watch(vendorAndProductIDs [][]uint16) error {
 
 				// Our device seems disconnected. Clean up shop.
 				if shouldDisconnect {
-					usbDeviceDescriptor, _ := b.currentConnectedDevice.dev.DeviceDescriptor()
-					manufacturer, _ := b.currentConnectedDevice.handle.StringDescriptorASCII(usbDeviceDescriptor.ManufacturerIndex)
-					b.Log(fmt.Sprintf("[zerousb] Detected UNPLUG event for device: %+v \n", manufacturer))
+					b.Log(fmt.Sprintf("[zerousb] Detected UNPLUG event for device: %+v \n", b.currentConnectedDevice.identifier))
 					b.currentConnectedDevice.Close(true)
 					b.currentConnectedDevice = nil
 				}
@@ -217,9 +223,8 @@ func (b *ZeroUSB) Watch(vendorAndProductIDs [][]uint16) error {
 					continue
 				}
 
-				usbDeviceDescriptor, _ := watchedAndConnectedDevices[0].DeviceDescriptor()
-				b.Log(fmt.Sprintf("[zerousb] Detected PLUG event for device: %+v \n", usbDeviceDescriptor.ManufacturerIndex))
-				_, err = b.Connect("", uint16(watchedAndConnectedDevices[0].libusbDevice.device_descriptor.idVendor), uint16(watchedAndConnectedDevices[0].libusbDevice.device_descriptor.idProduct))
+				b.Log(fmt.Sprintf("[zerousb] Detected PLUG event for device: %+v \n", watchedAndConnectedDevices[0].Identifier))
+				_, err = b.Connect(watchedAndConnectedDevices[0].Identifier, uint16(watchedAndConnectedDevices[0].Device.libusbDevice.device_descriptor.idVendor), uint16(watchedAndConnectedDevices[0].Device.libusbDevice.device_descriptor.idProduct))
 				if err != nil {
 					b.Error(fmt.Sprintf("[zerousb] Unable to connect to device: %+v \n", err))
 					continue
@@ -231,7 +236,7 @@ func (b *ZeroUSB) Watch(vendorAndProductIDs [][]uint16) error {
 	return nil
 }
 
-func (b *ZeroUSB) Connect(name string, vendorID, productID uint16) (*ZeroUSBDevice, error) {
+func (b *ZeroUSB) Connect(name *string, vendorID, productID uint16) (*ZeroUSBDevice, error) {
 	if b.usbContext == nil {
 		return nil, errors.New("No context. Initialize ZeroUSB.")
 	}
@@ -303,6 +308,7 @@ func (b *ZeroUSB) Connect(name string, vendorID, productID uint16) (*ZeroUSBDevi
 					productID,
 				))
 				device = &ZeroUSBDevice{
+					identifier:         name,
 					dev:                usbDevice,
 					options:            b.options,
 					logger:             b.logger,

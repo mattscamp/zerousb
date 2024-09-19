@@ -21,7 +21,7 @@ func main() {
 		panic(err)
 	}
 
-	device, err := zerousb.Connect("Aillio Bullet R1", ExampleVendorId, ExampleProductId)
+	device, err := zerousb.Connect(nil, ExampleVendorId, ExampleProductId)
 	if err != nil {
 		panic(err)
 	}
