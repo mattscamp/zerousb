@@ -61,7 +61,7 @@ type ZeroUSB struct {
 }
 
 type ZeroUSBDevice struct {
-	identifier         *string
+	Identifier         *string
 	dev                *Device
 	options            Options
 	logger             *logrus.Logger
@@ -208,7 +208,7 @@ func (b *ZeroUSB) Watch(vendorAndProductIDs []VendorAndProduct) error {
 
 				// Our device seems disconnected. Clean up shop.
 				if shouldDisconnect {
-					b.Log(fmt.Sprintf("[zerousb] Detected UNPLUG event for device: %+v \n", b.currentConnectedDevice.identifier))
+					b.Log(fmt.Sprintf("[zerousb] Detected UNPLUG event for device: %+v \n", b.currentConnectedDevice.Identifier))
 					b.currentConnectedDevice.Close(true)
 					b.currentConnectedDevice = nil
 				}
@@ -308,7 +308,7 @@ func (b *ZeroUSB) Connect(name *string, vendorID, productID uint16) (*ZeroUSBDev
 					productID,
 				))
 				device = &ZeroUSBDevice{
-					identifier:         name,
+					Identifier:         name,
 					dev:                usbDevice,
 					options:            b.options,
 					logger:             b.logger,
