@@ -175,6 +175,7 @@ func (b *ZeroUSB) Watch(vendorAndProductIDs []VendorAndProduct) error {
 			case <-ticker.C:
 				if b.usbContext == nil {
 					b.endWatcher <- true
+					continue
 				}
 
 				connectedDevices, err := b.usbContext.DeviceList()
