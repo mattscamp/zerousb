@@ -94,7 +94,9 @@ func New(options Options, logger *logrus.Logger) (*ZeroUSB, error) {
 
 func (b *ZeroUSB) Close() {
 	if b.usbContext != nil {
+		b.currentConnectedDevice.Close(true)
 		b.usbContext.Close()
+		b.usbContext = nil
 	}
 }
 
