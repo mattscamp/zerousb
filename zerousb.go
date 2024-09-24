@@ -360,7 +360,7 @@ func (d *ZeroUSBDevice) Close(disconnected bool) error {
 		d.ClearBuffer()
 	}
 
-	if d.handle != nil {
+	if d != nil && d.handle != nil {
 		err := d.handle.ReleaseInterface(d.ifaceNum)
 		if err != nil {
 			d.Error(fmt.Sprintf("error at releasing interface: %s", err))
