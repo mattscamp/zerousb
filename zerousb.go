@@ -396,6 +396,8 @@ func (d *ZeroUSBDevice) Write(buf []byte) (int, error) {
 		d.Log(fmt.Sprintf("DEBUG. Write. %+v \n", buf))
 	}
 
+	d.lock.TryLock()
+	defer d.lock.Unlock()
 	return d.handle.BulkTransferOut(*d.writer, buf, 500)
 }
 
@@ -413,6 +415,8 @@ func (d *ZeroUSBDevice) Read(length int, timeout int) ([]byte, error) {
 		timeout = 5000
 	}
 
+	d.lock.TryLock()
+	defer d.lock.Unlock()
 	readRes, _, err := d.handle.BulkTransferIn(*d.reader, length, timeout)
 	if err != nil {
 		return nil, err
