@@ -372,6 +372,10 @@ func (d *ZeroUSBDevice) Close(disconnected bool) error {
 	return nil
 }
 
+func (d *ZeroUSBDevice) GetIdentifier() *string {
+	return d.Identifier
+}
+
 func (d *ZeroUSBDevice) ClearBuffer() {
 	var err error
 
