@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -29,10 +30,6 @@ type ID uint16
 func (id ID) String() string {
 	return fmt.Sprintf("%04x", int(id))
 }
-
-const (
-	usbConfigIndex = 0
-)
 
 type VendorAndProduct struct {
 	VendorId   uint16
@@ -94,45 +91,24 @@ func New(options Options, logger *logrus.Logger) (*ZeroUSB, error) {
 
 func (b *ZeroUSB) Close() {
 	if b.usbContext != nil {
-		b.currentConnectedDevice.Close(true)
+		if b.currentConnectedDevice != nil {
+			b.currentConnectedDevice.Close(true)
+			b.currentConnectedDevice = nil
+		}
 		b.usbContext.Close()
 		b.usbContext = nil
 	}
 }
 
-func (b *ZeroUSB) Log(msg string) {
+func (b *ZeroUSB) logf(level logrus.Level, format string, args ...interface{}) {
 	if b.logger != nil {
-		b.logger.Info(fmt.Sprintf("[zerousb] %s \n", msg))
+		b.logger.Logf(level, "(zerousb) "+format, args...)
 	}
 }
 
-func (b *ZeroUSB) Error(msg string) {
+func (b *ZeroUSBDevice) logf(level logrus.Level, format string, args ...interface{}) {
 	if b.logger != nil {
-		b.logger.Error(fmt.Sprintf("[zerousb] %s \n", msg))
-	}
-}
-
-func (b *ZeroUSB) Warn(msg string) {
-	if b.logger != nil {
-		b.logger.Warn(fmt.Sprintf("[zerousb] %s \n", msg))
-	}
-}
-
-func (b *ZeroUSBDevice) Log(msg string) {
-	if b.logger != nil {
-		b.logger.Info(fmt.Sprintf("[zerousb] %s \n", msg))
-	}
-}
-
-func (b *ZeroUSBDevice) Error(msg string) {
-	if b.logger != nil {
-		b.logger.Error(fmt.Sprintf("[zerousb] %s \n", msg))
-	}
-}
-
-func (b *ZeroUSBDevice) Warn(msg string) {
-	if b.logger != nil {
-		b.logger.Warn(fmt.Sprintf("[zerousb] %s \n", msg))
+		b.logger.Logf(level, "(zerousb) "+format, args...)
 	}
 }
 
@@ -158,7 +134,9 @@ func (b *ZeroUSB) Get() (*ZeroUSBDevice, error) {
 }
 
 func (b *ZeroUSB) EndWatch() {
-	b.endWatcher <- true
+	if b.endWatcher != nil {
+		b.endWatcher <- true
+	}
 }
 
 func (b *ZeroUSB) Watch(vendorAndProductIDs []VendorAndProduct) error {
@@ -182,7 +160,7 @@ func (b *ZeroUSB) Watch(vendorAndProductIDs []VendorAndProduct) error {
 
 				connectedDevices, err := b.usbContext.DeviceList()
 				if err != nil {
-					b.Error(fmt.Sprintf("[zerousb] Getting devices: %+v \n", err))
+					b.logf(logrus.ErrorLevel, "Getting devices: %+v", err)
 					b.endWatcher <- true
 				}
 
@@ -215,7 +193,7 @@ func (b *ZeroUSB) Watch(vendorAndProductIDs []VendorAndProduct) error {
 
 				// Our device seems disconnected. Clean up shop.
 				if shouldDisconnect {
-					b.Log(fmt.Sprintf("[zerousb] Detected UNPLUG event for device: %+v \n", b.currentConnectedDevice.Identifier))
+					b.logf(logrus.InfoLevel, "Detected UNPLUG event for device: %+v", b.currentConnectedDevice.Identifier)
 					b.currentConnectedDevice.Close(true)
 					b.currentConnectedDevice = nil
 				}
@@ -230,10 +208,10 @@ func (b *ZeroUSB) Watch(vendorAndProductIDs []VendorAndProduct) error {
 					continue
 				}
 
-				b.Log(fmt.Sprintf("[zerousb] Detected PLUG event for device: %+v \n", watchedAndConnectedDevices[0].Identifier))
+				b.logf(logrus.InfoLevel, "Detected PLUG event for device: %+v", watchedAndConnectedDevices[0].Identifier)
 				_, err = b.Connect(watchedAndConnectedDevices[0].Identifier, uint16(watchedAndConnectedDevices[0].Device.libusbDevice.device_descriptor.idVendor), uint16(watchedAndConnectedDevices[0].Device.libusbDevice.device_descriptor.idProduct))
 				if err != nil {
-					b.Error(fmt.Sprintf("[zerousb] Unable to connect to device: %+v \n", err))
+					b.logf(logrus.ErrorLevel, "Unable to connect to device: %+v", err)
 					continue
 				}
 			}
@@ -250,18 +228,18 @@ func (b *ZeroUSB) Connect(name *string, vendorID, productID uint16) (*ZeroUSBDev
 
 	var device *ZeroUSBDevice
 
-	b.Log(fmt.Sprintf("[zerousb] Attempting to open device: %s \n", name))
+	b.logf(logrus.InfoLevel, "Attempting to open device: %s ", name)
 
 	// attempt to find the device on the OS
 	usbDevice, usbDeviceHandle, err := b.usbContext.OpenDeviceWithVendorProduct(vendorID, productID)
 	if err != nil {
-		b.Error(fmt.Sprintf("[zerousb] Failed to find device %s (%v) \n", name, err))
+		b.logf(logrus.ErrorLevel, "Failed to find device %s (%v)", name, err)
 		return nil, errors.New("Unable to find device.")
 	}
 
 	activeCfg, err := usbDevice.ActiveConfigDescriptor()
 	if err != nil {
-		b.Error(fmt.Sprintf("[zerousb] Failed get active config for %s (%v) \n", name, err))
+		b.logf(logrus.ErrorLevel, "Failed get active config for %s (%v)", name, err)
 		return nil, errors.New("Unable to get active config")
 	}
 
@@ -298,22 +276,20 @@ func (b *ZeroUSB) Connect(name *string, vendorID, productID uint16) (*ZeroUSBDev
 
 			// If both in and out interrupts are available, match the device
 			if reader != nil && writer != nil {
-				usbDeviceDescriptor, _ := usbDevice.DeviceDescriptor()
+				usbDeviceDescriptor, err := usbDevice.DeviceDescriptor()
 				if err != nil {
-					b.Error(fmt.Sprintf("[zerousb] Failed opening %s (%v \n", name, err))
-					return nil, errors.New("Failed to open device.")
+					b.logf(logrus.ErrorLevel, "Failed to get device descriptor for %s (%v)", name, err)
+					return nil, errors.New("Failed to get device descriptor")
 				}
 
 				serialnum, _ := usbDeviceHandle.StringDescriptorASCII(usbDeviceDescriptor.SerialNumberIndex)
 				manufacturer, _ := usbDeviceHandle.StringDescriptorASCII(usbDeviceDescriptor.ManufacturerIndex)
 				product, _ := usbDeviceHandle.StringDescriptorASCII(usbDeviceDescriptor.ProductIndex)
-				b.Log(fmt.Sprintf("[zerousb] Found %v %v S/N %s using Vendor ID %v and Product ID %v\n",
-					manufacturer,
+				b.logf(logrus.InfoLevel, "Found %v %v S/N %s using Vendor ID %v and Product ID %v", manufacturer,
 					product,
 					serialnum,
 					vendorID,
-					productID,
-				))
+					productID)
 				device = &ZeroUSBDevice{
 					Identifier:         name,
 					dev:                usbDevice,
@@ -331,23 +307,22 @@ func (b *ZeroUSB) Connect(name *string, vendorID, productID uint16) (*ZeroUSBDev
 	}
 
 	if device == nil {
-		// we could not find a device
-		b.Error(fmt.Sprintf("[zerousb] Failed to find device %s \n", name))
-		return nil, errors.New("Failed to find device.")
+		b.logf(logrus.ErrorLevel, "Failed to find device: %s", name)
+		return nil, errors.New("failed to find device")
 	}
 
 	if b.canDetach {
 		err := usbDeviceHandle.DetachKernelDriver(device.ifaceNum)
 		if err != nil {
-			b.Warn(fmt.Sprintf("detach of kernal driver failed: %s", err.Error()))
-			// Fail softly. This is a newer MacOS feature any may not work everywhere.
+			b.logf(logrus.WarnLevel, "Failed to detach kernel driver: %v", err)
+			// Fail softly. This is a newer MacOS feature and may not work everywhere.
 		}
 	}
 
 	err = usbDeviceHandle.ClaimInterface(device.ifaceNum)
 	if err != nil {
-		b.Error(fmt.Sprintf("[zerousb] Failed to claim interface number %d: %v \n", device.ifaceNum, err))
-		return nil, errors.New("Error claiming interface.")
+		b.logf(logrus.ErrorLevel, "Failed to claim interface %d: %v", device.ifaceNum, err)
+		return nil, errors.New("failed to claim interface")
 	}
 
 	b.currentConnectedDevice = device
@@ -360,10 +335,15 @@ func (d *ZeroUSBDevice) Close(disconnected bool) error {
 		d.ClearBuffer()
 	}
 
+	if !atomic.CompareAndSwapInt32(&d.closed, 0, 1) {
+		// already closed
+		return nil
+	}
+
 	if d != nil && d.handle != nil {
 		err := d.handle.ReleaseInterface(d.ifaceNum)
 		if err != nil {
-			d.Error(fmt.Sprintf("error at releasing interface: %s", err))
+			d.logf(logrus.ErrorLevel, "Failed to release interface: %v", err)
 		}
 
 		d.handle.Close()
@@ -377,10 +357,12 @@ func (d *ZeroUSBDevice) GetIdentifier() *string {
 }
 
 func (d *ZeroUSBDevice) ClearBuffer() {
-	var err error
-
-	for err == nil {
-		_, err = d.Read(64, 50)
+	for {
+		_, err := d.Read(64, 50)
+		if err != nil {
+			d.logf(logrus.DebugLevel, "Stopping ClearBuffer due to read error: %v", err)
+			break
+		}
 	}
 }
 
@@ -393,38 +375,51 @@ func IsErrorDisconnect(err error) bool {
 
 func (d *ZeroUSBDevice) Write(buf []byte) (int, error) {
 	if d.writer == nil {
-		return 0, fmt.Errorf("Attempt to write before opening connection.")
+		return 0, fmt.Errorf("attempt to write before opening connection")
 	}
 
-	if d.options.LogLevel == LogLevelDebug {
-		d.Log(fmt.Sprintf("DEBUG. Write. %+v \n", buf))
-	}
+	d.logf(logrus.DebugLevel, "Attempting to write %d bytes", len(buf))
 
-	d.lock.TryLock()
+	locked := d.lock.TryLock()
+	if !locked {
+		return 0, fmt.Errorf("device lock busy")
+	}
 	defer d.lock.Unlock()
-	return d.handle.BulkTransferOut(*d.writer, buf, 500)
+
+	bytesWritten, err := d.handle.BulkTransferOut(*d.writer, buf, 500)
+	if err != nil {
+		d.logf(logrus.ErrorLevel, "Write error: %v", err)
+	} else {
+		d.logf(logrus.DebugLevel, "Wrote %d bytes", bytesWritten)
+	}
+
+	return bytesWritten, err
 }
 
 func (d *ZeroUSBDevice) Read(length int, timeout int) ([]byte, error) {
 	if d.writer == nil {
-		return []byte{}, fmt.Errorf("Attempt to read before opening connection.")
+		return []byte{}, fmt.Errorf("attempt to read before opening connection")
 	}
 
-	if d.options.LogLevel == LogLevelDebug {
-		d.Log(fmt.Sprintf("DEBUG. Read. %+v \n", length))
-	}
+	d.logf(logrus.DebugLevel, "Attempting to read %d bytes with timeout %dms", length, timeout)
 
-	// default read timeout
 	if timeout == 0 {
 		timeout = 5000
 	}
 
-	d.lock.TryLock()
+	locked := d.lock.TryLock()
+	if !locked {
+		return []byte{}, fmt.Errorf("device lock busy")
+	}
 	defer d.lock.Unlock()
+
 	readRes, _, err := d.handle.BulkTransferIn(*d.reader, length, timeout)
 	if err != nil {
+		d.logf(logrus.ErrorLevel, "Read error: %v", err)
 		return nil, err
 	}
+
+	d.logf(logrus.DebugLevel, "Read %d bytes", len(readRes))
 
 	return readRes, nil
 }
