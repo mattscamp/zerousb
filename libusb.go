@@ -901,11 +901,14 @@ func (dh *DeviceHandle) SetInterfaceAltSetting(
 	return nil
 }
 
-// FIXME(mdr): libusb_clear_halt takes an endpoint as an unsigned char. Need to
-// determine, what I should pass into this function as the endpoint.
-// func (dh *DeviceHandle) ClearHalt(endpoint int) error {
-// return nil
-// }
+// ClearHalt implements libusb_clear_halt to clear a halt/stall condition on an endpoint.
+func (dh *DeviceHandle) ClearHalt(endpoint endpointAddress) error {
+	err := C.libusb_clear_halt(dh.libusbDeviceHandle, C.uchar(endpoint))
+	if err != 0 {
+		return ErrorCode(err)
+	}
+	return nil
+}
 
 // ResetDevice implements libusb_reset_device to perform a USB port reset to
 // reinitialize a device.

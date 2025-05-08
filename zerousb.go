@@ -423,3 +423,27 @@ func (d *ZeroUSBDevice) Read(length int, timeout int) ([]byte, error) {
 
 	return readRes, nil
 }
+
+// ClearHalt clears a halt/stall condition on the specified endpoint.
+func (d *ZeroUSBDevice) ClearHalt(endpoint endpointAddress) error {
+	if d.handle == nil {
+		return fmt.Errorf("attempt to clear halt before opening connection")
+	}
+
+	d.logf(logrus.DebugLevel, "Attempting to clear halt on endpoint 0x%02x", endpoint)
+
+	locked := d.lock.TryLock()
+	if !locked {
+		return fmt.Errorf("device lock busy")
+	}
+	defer d.lock.Unlock()
+
+	err := d.handle.ClearHalt(endpoint)
+	if err != nil {
+		d.logf(logrus.ErrorLevel, "Clear halt error: %v", err)
+	} else {
+		d.logf(logrus.DebugLevel, "Successfully cleared halt on endpoint 0x%02x", endpoint)
+	}
+
+	return err
+}
