@@ -53,7 +53,8 @@ type DeviceWithId struct {
 }
 
 type Options struct {
-	LogLevel LogLevel
+	LogLevel        LogLevel
+	DisableRecovery bool
 }
 
 type ZeroUSB struct {
@@ -191,7 +192,7 @@ func (b *ZeroUSB) Watch(vendorAndProductIDs []VendorAndProduct) error {
 					errorCount := b.currentConnectedDevice.GetErrorCount()
 
 					// Attempt recovery if device is in error state
-					if state == DeviceStateError && errorCount > 0 {
+					if !b.options.DisableRecovery && state == DeviceStateError && errorCount > 0 {
 						b.logf(logrus.WarnLevel, "Device in error state (errors: %d), attempting recovery", errorCount)
 						if recoveryErr := b.currentConnectedDevice.RecoverDevice(); recoveryErr != nil {
 							b.logf(logrus.ErrorLevel, "Device recovery failed: %v", recoveryErr)
@@ -531,7 +532,7 @@ func (d *ZeroUSBDevice) Write(buf []byte) (int, error) {
 }
 
 func (d *ZeroUSBDevice) Read(length int, timeout int) ([]byte, error) {
-	if d.writer == nil {
+	if d.reader == nil {
 		return []byte{}, fmt.Errorf("attempt to read before opening connection")
 	}
 
