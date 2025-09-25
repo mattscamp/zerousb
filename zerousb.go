@@ -149,6 +149,34 @@ func indexOfVendorIDAndProductID(ids []VendorAndProduct, lookup []uint16) *int {
 	return nil
 }
 
+type EnumerateDetails struct {
+	VID string
+	PID string
+}
+
+func (b *ZeroUSB) Enumerate() []EnumerateDetails {
+	if b.usbContext == nil {
+		b.logf(logrus.ErrorLevel, "No context. Initialize ZeroUSB.")
+		return nil
+	}
+
+	devices, err := b.usbContext.DeviceList()
+	if err != nil {
+		b.logf(logrus.ErrorLevel, "Getting devices: %+v", err)
+		return nil
+	}
+
+	connectedDevices := []EnumerateDetails{}
+	for _, device := range devices {
+		connectedDevices = append(connectedDevices, EnumerateDetails{
+			VID: fmt.Sprintf("%04x", uint16(device.libusbDevice.device_descriptor.idVendor)),
+			PID: fmt.Sprintf("%04x", uint16(device.libusbDevice.device_descriptor.idProduct)),
+		})
+	}
+
+	return connectedDevices
+}
+
 func (b *ZeroUSB) Get() (*ZeroUSBDevice, error) {
 	if b.usbContext == nil {
 		return nil, errors.New("No context. Initialize ZeroUSB.")
