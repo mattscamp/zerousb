@@ -66,6 +66,8 @@ type ZeroUSB struct {
 	productID              ID
 	currentConnectedDevice *ZeroUSBDevice
 	endWatcher             chan bool
+	watcherActive          bool
+	watcherMu              sync.Mutex
 }
 
 type ZeroUSBDevice struct {
@@ -190,9 +192,21 @@ func (b *ZeroUSB) Get() (*ZeroUSBDevice, error) {
 }
 
 func (b *ZeroUSB) EndWatch() {
-	if b.endWatcher != nil {
-		b.endWatcher <- true
+	b.watcherMu.Lock()
+	defer b.watcherMu.Unlock()
+
+	if b.watcherActive && b.endWatcher != nil {
+		close(b.endWatcher)
+		b.endWatcher = nil
 	}
+}
+
+func (dev *ZeroUSBDevice) matchesDevice(d DeviceWithId) bool {
+	if dev.handle == nil || dev.handle.libusbDeviceHandle == nil {
+		return false
+	}
+	return dev.handle.libusbDeviceHandle.dev.device_descriptor.idVendor == d.Device.libusbDevice.device_descriptor.idVendor &&
+		dev.handle.libusbDeviceHandle.dev.device_descriptor.idProduct == d.Device.libusbDevice.device_descriptor.idProduct
 }
 
 func (b *ZeroUSB) Watch(vendorAndProductIDs []VendorAndProduct) error {
@@ -200,31 +214,44 @@ func (b *ZeroUSB) Watch(vendorAndProductIDs []VendorAndProduct) error {
 		return errors.New("No context. Initialize ZeroUSB.")
 	}
 
+	b.watcherMu.Lock()
+	if b.watcherActive {
+		b.watcherMu.Unlock()
+		return errors.New("Watcher is already running")
+	}
+	b.watcherActive = true
+	b.watcherMu.Unlock()
+
 	ticker := time.NewTicker(1 * time.Second)
 	b.endWatcher = make(chan bool)
+
 	go func() {
+		defer func() {
+			ticker.Stop()
+			b.watcherMu.Lock()
+			b.watcherActive = false
+			b.watcherMu.Unlock()
+		}()
+
 		for {
 			select {
 			case <-b.endWatcher:
-				ticker.Stop()
+				// Stop requested
 				return
 			case <-ticker.C:
 				if b.usbContext == nil {
-					b.endWatcher <- true
-					continue
+					b.logf(logrus.ErrorLevel, "USB context gone, stopping watcher")
+					return // fatal
 				}
 
-				// Check device health if we have a connected device
+				// Device health check
 				if b.currentConnectedDevice != nil {
 					state := b.currentConnectedDevice.GetState()
 					errorCount := b.currentConnectedDevice.GetErrorCount()
-
-					// Attempt recovery if device is in error state
 					if !b.options.DisableRecovery && state == DeviceStateError && errorCount > 0 {
-						b.logf(logrus.WarnLevel, "Device in error state (errors: %d), attempting recovery", errorCount)
-						if recoveryErr := b.currentConnectedDevice.RecoverDevice(); recoveryErr != nil {
-							b.logf(logrus.ErrorLevel, "Device recovery failed: %v", recoveryErr)
-							// Force disconnect and reconnect
+						b.logf(logrus.WarnLevel, "Device in error state, attempting recovery")
+						if err := b.currentConnectedDevice.RecoverDevice(); err != nil {
+							b.logf(logrus.ErrorLevel, "Recovery failed: %v", err)
 							b.currentConnectedDevice.Close(true)
 							b.currentConnectedDevice = nil
 						} else {
@@ -233,76 +260,67 @@ func (b *ZeroUSB) Watch(vendorAndProductIDs []VendorAndProduct) error {
 					}
 				}
 
+				// List devices (transient failure → continue)
 				connectedDevices, err := b.usbContext.DeviceList()
 				if err != nil {
-					b.logf(logrus.ErrorLevel, "Getting devices: %+v", err)
-					b.endWatcher <- true
+					b.logf(logrus.ErrorLevel, "Getting devices failed, retrying: %v", err)
 					continue
 				}
 
-				watchedAndConnectedDevices := []DeviceWithId{}
-				for _, device := range connectedDevices {
+				// Filter watched devices
+				watchedDevices := []DeviceWithId{}
+				for _, dev := range connectedDevices {
 					index := indexOfVendorIDAndProductID(vendorAndProductIDs, []uint16{
-						uint16(device.libusbDevice.device_descriptor.idVendor),
-						uint16(device.libusbDevice.device_descriptor.idProduct),
+						uint16(dev.libusbDevice.device_descriptor.idVendor),
+						uint16(dev.libusbDevice.device_descriptor.idProduct),
 					})
 					if index != nil {
-						watchedAndConnectedDevices = append(watchedAndConnectedDevices, DeviceWithId{
+						watchedDevices = append(watchedDevices, DeviceWithId{
 							Identifier: vendorAndProductIDs[*index].Identifier,
-							Device:     device,
+							Device:     dev,
 						})
 					}
 				}
 
-				// Disconnect current device if gone
-				shouldDisconnect := true
+				// Handle disconnects
 				if b.currentConnectedDevice != nil {
-					for _, d := range watchedAndConnectedDevices {
-						if b.currentConnectedDevice.handle != nil &&
-							b.currentConnectedDevice.handle.libusbDeviceHandle.dev.device_descriptor.idVendor == d.Device.libusbDevice.device_descriptor.idVendor &&
-							b.currentConnectedDevice.handle.libusbDeviceHandle.dev.device_descriptor.idProduct == d.Device.libusbDevice.device_descriptor.idProduct {
+					shouldDisconnect := true
+					for _, d := range watchedDevices {
+						if b.currentConnectedDevice.matchesDevice(d) {
 							shouldDisconnect = false
 							break
 						}
 					}
-
-					// Also disconnect if device state indicates it's disconnected
 					if b.currentConnectedDevice.GetState() == DeviceStateDisconnected {
 						shouldDisconnect = true
-						b.logf(logrus.InfoLevel, "Device marked as disconnected, forcing disconnect")
 					}
-				} else {
-					shouldDisconnect = false
+					if shouldDisconnect {
+						b.logf(logrus.InfoLevel, "Detected UNPLUG for %v", b.currentConnectedDevice.Identifier)
+						b.currentConnectedDevice.Close(true)
+						b.currentConnectedDevice = nil
+					}
 				}
 
-				if shouldDisconnect {
-					b.logf(logrus.InfoLevel, "Detected UNPLUG event for device: %+v", b.currentConnectedDevice.Identifier)
-					b.currentConnectedDevice.Close(true)
-					b.currentConnectedDevice = nil
-				}
-
-				// Already connected and healthy
+				// If healthy device connected, continue
 				if b.currentConnectedDevice != nil && b.currentConnectedDevice.IsHealthy() {
 					continue
 				}
 
-				// No watched device found
-				if len(watchedAndConnectedDevices) == 0 {
-					continue
+				// Attempt reconnect if any watched device found
+				if len(watchedDevices) > 0 {
+					devToConnect := watchedDevices[0]
+					b.logf(logrus.InfoLevel, "Detected PLUG for %v", devToConnect.Identifier)
+					deviceInstance, err := b.Connect(
+						devToConnect.Identifier,
+						uint16(devToConnect.Device.libusbDevice.device_descriptor.idVendor),
+						uint16(devToConnect.Device.libusbDevice.device_descriptor.idProduct),
+					)
+					if err != nil {
+						b.logf(logrus.WarnLevel, "Reconnect failed, will retry next tick: %v", err)
+						continue
+					}
+					b.currentConnectedDevice = deviceInstance
 				}
-
-				// Attempt reconnect
-				devToConnect := watchedAndConnectedDevices[0]
-				b.logf(logrus.InfoLevel, "Detected PLUG event for device: %+v", devToConnect.Identifier)
-				deviceInstance, err := b.Connect(devToConnect.Identifier,
-					uint16(devToConnect.Device.libusbDevice.device_descriptor.idVendor),
-					uint16(devToConnect.Device.libusbDevice.device_descriptor.idProduct),
-				)
-				if err != nil {
-					b.logf(logrus.WarnLevel, "Reconnect failed, will retry next tick: %+v", err)
-					continue
-				}
-				b.currentConnectedDevice = deviceInstance
 			}
 		}
 	}()
