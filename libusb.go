@@ -83,8 +83,6 @@ import (
 	"log"
 	"math"
 	"unsafe"
-
-	"github.com/sirupsen/logrus"
 )
 
 func bcdToDecimal(bcdValue uint16) float64 {
