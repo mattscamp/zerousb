@@ -83,6 +83,8 @@ import (
 	"log"
 	"math"
 	"unsafe"
+
+	"github.com/sirupsen/logrus"
 )
 
 func bcdToDecimal(bcdValue uint16) float64 {
@@ -832,6 +834,12 @@ func (dh *DeviceHandle) StringDescriptorASCII(
 
 // Close implements libusb_close to close the device handle.
 func (dh *DeviceHandle) Close() error {
+	// Recover from any libusb panic just in case
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Recovered from libusb_close panic: %v", r)
+		}
+	}()
 	C.libusb_close(dh.libusbDeviceHandle)
 	return nil
 }

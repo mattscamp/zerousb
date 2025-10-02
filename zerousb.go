@@ -77,6 +77,7 @@ type ZeroUSBDevice struct {
 	logger             *logrus.Logger
 	closed             int32 // atomic
 	lock               sync.Mutex
+	closeMu            sync.Mutex
 	attach             bool
 	handle             *DeviceHandle
 	reader             *endpointAddress
@@ -456,6 +457,8 @@ func (b *ZeroUSB) Connect(name *string, vendorID, productID uint16) (*ZeroUSBDev
 }
 
 func (d *ZeroUSBDevice) Close(disconnected bool) error {
+	d.closeMu.Lock()
+	defer d.closeMu.Unlock()
 	if !atomic.CompareAndSwapInt32(&d.closed, 0, 1) {
 		// already closed
 		return nil
