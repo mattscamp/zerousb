@@ -210,6 +210,10 @@ func (dev *ZeroUSBDevice) matchesDevice(d DeviceWithId) bool {
 		dev.handle.libusbDeviceHandle.dev.device_descriptor.idProduct == d.Device.libusbDevice.device_descriptor.idProduct
 }
 
+func (b *ZeroUSB) IsWatching() bool {
+	return b.watcherActive && b.endWatcher != nil
+}
+
 func (b *ZeroUSB) Watch(vendorAndProductIDs []VendorAndProduct) error {
 	if b.usbContext == nil {
 		return errors.New("No context. Initialize ZeroUSB.")
