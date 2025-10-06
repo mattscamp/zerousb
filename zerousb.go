@@ -109,13 +109,7 @@ func New(options Options, logger *logrus.Logger) (*ZeroUSB, error) {
 
 func (b *ZeroUSB) Close() {
 	if b.usbContext != nil {
-		// End any watching first
-		if b.endWatcher != nil {
-			select {
-			case b.endWatcher <- true:
-			default:
-			}
-		}
+		b.EndWatch()
 
 		// Close current device with proper cleanup
 		if b.currentConnectedDevice != nil {
