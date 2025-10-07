@@ -1,6 +1,7 @@
 package zerousb
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"runtime"
@@ -65,7 +66,9 @@ type ZeroUSB struct {
 	vendorID               ID
 	productID              ID
 	currentConnectedDevice *ZeroUSBDevice
-	endWatcher             chan bool
+	watcherCtx             context.Context    // watcher context
+	watcherCancel          context.CancelFunc //  cancel function
+	watcherDone            chan struct{}      // signals watcher has exited
 	watcherActive          bool
 	watcherMu              sync.Mutex
 }
@@ -111,14 +114,14 @@ func (b *ZeroUSB) Close() {
 	if b.usbContext != nil {
 		b.EndWatch()
 
-		// Close current device with proper cleanup
+		if b.watcherDone != nil {
+			<-b.watcherDone
+		}
+
 		if b.currentConnectedDevice != nil {
 			b.currentConnectedDevice.Close(false)
 			b.currentConnectedDevice = nil
 		}
-
-		// Small delay to ensure cleanup completes
-		time.Sleep(100 * time.Millisecond)
 
 		b.usbContext.Close()
 		b.usbContext = nil
@@ -190,9 +193,9 @@ func (b *ZeroUSB) EndWatch() {
 	b.watcherMu.Lock()
 	defer b.watcherMu.Unlock()
 
-	if b.watcherActive && b.endWatcher != nil {
-		close(b.endWatcher)
-		b.endWatcher = nil
+	if b.watcherActive && b.watcherCancel != nil {
+		b.watcherCancel()
+		b.watcherCancel = nil
 	}
 }
 
@@ -205,7 +208,7 @@ func (dev *ZeroUSBDevice) matchesDevice(d DeviceWithId) bool {
 }
 
 func (b *ZeroUSB) IsWatching() bool {
-	return b.watcherActive && b.endWatcher != nil
+	return b.watcherActive && b.watcherCancel != nil
 }
 
 func (b *ZeroUSB) Watch(vendorAndProductIDs []VendorAndProduct) error {
@@ -218,11 +221,13 @@ func (b *ZeroUSB) Watch(vendorAndProductIDs []VendorAndProduct) error {
 		b.watcherMu.Unlock()
 		return errors.New("Watcher is already running")
 	}
+
 	b.watcherActive = true
+	b.watcherDone = make(chan struct{})
+	b.watcherCtx, b.watcherCancel = context.WithCancel(context.Background())
 	b.watcherMu.Unlock()
 
 	ticker := time.NewTicker(1 * time.Second)
-	b.endWatcher = make(chan bool)
 
 	go func() {
 		defer func() {
@@ -230,17 +235,24 @@ func (b *ZeroUSB) Watch(vendorAndProductIDs []VendorAndProduct) error {
 			b.watcherMu.Lock()
 			b.watcherActive = false
 			b.watcherMu.Unlock()
+			close(b.watcherDone)
 		}()
 
 		for {
 			select {
-			case <-b.endWatcher:
-				// Stop requested
+			case <-b.watcherCtx.Done():
 				return
 			case <-ticker.C:
+				// Periodically check context inside long operations
+				select {
+				case <-b.watcherCtx.Done():
+					return
+				default:
+				}
+
 				if b.usbContext == nil {
 					b.logf(logrus.ErrorLevel, "USB context gone, stopping watcher")
-					return // fatal
+					return
 				}
 
 				// Device health check
@@ -249,7 +261,7 @@ func (b *ZeroUSB) Watch(vendorAndProductIDs []VendorAndProduct) error {
 					errorCount := b.currentConnectedDevice.GetErrorCount()
 					if !b.options.DisableRecovery && state == DeviceStateError && errorCount > 0 {
 						b.logf(logrus.WarnLevel, "Device in error state, attempting recovery")
-						if err := b.currentConnectedDevice.RecoverDevice(); err != nil {
+						if err := b.currentConnectedDevice.RecoverDevice(b.watcherCtx); err != nil {
 							b.logf(logrus.ErrorLevel, "Recovery failed: %v", err)
 							b.currentConnectedDevice.Close(true)
 							b.currentConnectedDevice = nil
@@ -310,6 +322,7 @@ func (b *ZeroUSB) Watch(vendorAndProductIDs []VendorAndProduct) error {
 					devToConnect := watchedDevices[0]
 					b.logf(logrus.InfoLevel, "Detected PLUG for %v", devToConnect.Identifier)
 					deviceInstance, err := b.Connect(
+						b.watcherCtx,
 						devToConnect.Identifier,
 						uint16(devToConnect.Device.libusbDevice.device_descriptor.idVendor),
 						uint16(devToConnect.Device.libusbDevice.device_descriptor.idProduct),
@@ -327,29 +340,33 @@ func (b *ZeroUSB) Watch(vendorAndProductIDs []VendorAndProduct) error {
 	return nil
 }
 
-func (b *ZeroUSB) Connect(name *string, vendorID, productID uint16) (*ZeroUSBDevice, error) {
+func (b *ZeroUSB) Connect(ctx context.Context, name *string, vendorID, productID uint16) (*ZeroUSBDevice, error) {
 	if b.usbContext == nil {
 		return nil, errors.New("No context. Initialize ZeroUSB.")
 	}
 
 	var device *ZeroUSBDevice
+	b.logf(logrus.InfoLevel, "Attempting to open device: %s", name)
 
-	b.logf(logrus.InfoLevel, "Attempting to open device: %s ", name)
+	// Check for cancellation before attempting OS device open
+	abortIfCancelled(ctx, nil)
 
-	// attempt to find the device on the OS
 	usbDevice, usbDeviceHandle, err := b.usbContext.OpenDeviceWithVendorProduct(vendorID, productID)
 	if err != nil {
 		b.logf(logrus.ErrorLevel, "Failed to find device %s (%v)", name, err)
 		return nil, errors.New("Unable to find device.")
 	}
 
+	abortIfCancelled(ctx, func() { usbDeviceHandle.Close() })
+
 	activeCfg, err := usbDevice.ActiveConfigDescriptor()
 	if err != nil {
+		usbDeviceHandle.Close()
 		b.logf(logrus.ErrorLevel, "Failed get active config for %s (%v)", name, err)
 		return nil, errors.New("Unable to get active config")
 	}
 
-	// we found a device, now let's figure out if it is supported
+	// Device interface parsing remains unchanged
 	ifaces := activeCfg.SupportedInterfaces
 	for _, iface := range ifaces {
 		if iface.NumAltSettings == 0 {
@@ -357,7 +374,6 @@ func (b *ZeroUSB) Connect(name *string, vendorID, productID uint16) (*ZeroUSBDev
 		}
 
 		for _, alt := range iface.InterfaceDescriptors {
-			// Skip HID interfaces, they are handled directly by OS libraries
 			if alt.InterfaceClass == uint8(hid) {
 				continue
 			}
@@ -366,11 +382,9 @@ func (b *ZeroUSB) Connect(name *string, vendorID, productID uint16) (*ZeroUSBDev
 			var readerTransferType, writerTransferType TransferType
 
 			for _, end := range alt.EndpointDescriptors {
-				// Skip any non-bulk endpoints
 				if end.Attributes.transferType() != BulkTransfer {
 					continue
 				}
-
 				if end.Direction() == endpointIn {
 					reader = &end.EndpointAddress
 					readerTransferType = end.TransferType()
@@ -380,10 +394,12 @@ func (b *ZeroUSB) Connect(name *string, vendorID, productID uint16) (*ZeroUSBDev
 				}
 			}
 
-			// If both in and out interrupts are available, match the device
 			if reader != nil && writer != nil {
+				abortIfCancelled(ctx, func() { usbDeviceHandle.Close() })
+
 				usbDeviceDescriptor, err := usbDevice.DeviceDescriptor()
 				if err != nil {
+					usbDeviceHandle.Close()
 					b.logf(logrus.ErrorLevel, "Failed to get device descriptor for %s (%v)", name, err)
 					return nil, errors.New("Failed to get device descriptor")
 				}
@@ -391,11 +407,9 @@ func (b *ZeroUSB) Connect(name *string, vendorID, productID uint16) (*ZeroUSBDev
 				serialnum, _ := usbDeviceHandle.StringDescriptorASCII(usbDeviceDescriptor.SerialNumberIndex)
 				manufacturer, _ := usbDeviceHandle.StringDescriptorASCII(usbDeviceDescriptor.ManufacturerIndex)
 				product, _ := usbDeviceHandle.StringDescriptorASCII(usbDeviceDescriptor.ProductIndex)
-				b.logf(logrus.InfoLevel, "Found %v %v S/N %s using Vendor ID %v and Product ID %v", manufacturer,
-					product,
-					serialnum,
-					vendorID,
-					productID)
+				b.logf(logrus.InfoLevel, "Found %v %v S/N %s using Vendor ID %v and Product ID %v",
+					manufacturer, product, serialnum, vendorID, productID)
+
 				device = &ZeroUSBDevice{
 					Identifier:         name,
 					dev:                usbDevice,
@@ -416,41 +430,44 @@ func (b *ZeroUSB) Connect(name *string, vendorID, productID uint16) (*ZeroUSBDev
 	}
 
 	if device == nil {
+		usbDeviceHandle.Close()
 		b.logf(logrus.ErrorLevel, "Failed to find device: %s", name)
 		return nil, errors.New("failed to find device")
 	}
 
+	// Detach kernel driver if supported
 	if b.canDetach {
+		abortIfCancelled(ctx, func() { device.handle.Close() })
+
 		err := usbDeviceHandle.DetachKernelDriver(device.ifaceNum)
 		if err != nil {
 			b.logf(logrus.WarnLevel, "Failed to detach kernel driver: %v", err)
-			// Fail softly. This is a newer MacOS feature and may not work everywhere.
 		}
 		device.attach = true
 	}
 
+	abortIfCancelled(ctx, func() { device.handle.Close() })
+
+	// Claim interface with retry logic
 	err = usbDeviceHandle.ClaimInterface(device.ifaceNum)
 	if err != nil {
 		if strings.Contains(err.Error(), "LIBUSB_ERROR_BUSY") {
 			b.logf(logrus.WarnLevel, "Interface busy, attempting to force release and reclaim")
-			// Try to force release the interface first
 			usbDeviceHandle.ReleaseInterface(device.ifaceNum)
 			time.Sleep(100 * time.Millisecond)
 			err = usbDeviceHandle.ClaimInterface(device.ifaceNum)
 		}
 		if err != nil {
-			b.logf(logrus.ErrorLevel, "Failed to claim interface %d: %v", device.ifaceNum, err)
-			// Clean up before returning error
 			if device.attach {
 				usbDeviceHandle.AttachKernelDriver(device.ifaceNum)
 			}
 			usbDeviceHandle.Close()
+			b.logf(logrus.ErrorLevel, "Failed to claim interface %d: %v", device.ifaceNum, err)
 			return nil, errors.New("failed to claim interface")
 		}
 	}
 
 	b.currentConnectedDevice = device
-
 	return device, nil
 }
 
@@ -712,7 +729,7 @@ func (d *ZeroUSBDevice) ResetErrorState() {
 }
 
 // RecoverDevice attempts to recover the device from an error state
-func (d *ZeroUSBDevice) RecoverDevice() error {
+func (d *ZeroUSBDevice) RecoverDevice(ctx context.Context) error {
 	if atomic.LoadInt32(&d.closed) != 0 {
 		return ErrDeviceClosed
 	}
@@ -720,11 +737,16 @@ func (d *ZeroUSBDevice) RecoverDevice() error {
 	d.lock.Lock()
 	defer d.lock.Unlock()
 
+	// Check context before doing any work
+	abortIfCancelled(ctx, func() { d.logf(logrus.InfoLevel, "Recovery aborted due to watcher shutdown") })
+
 	d.logf(logrus.InfoLevel, "Attempting device recovery from state: %v", d.state)
 	d.state = DeviceStateRecovering
 
 	// Step 1: Clear halt on both endpoints
 	if d.reader != nil {
+		abortIfCancelled(ctx, nil)
+
 		if err := d.handle.ClearHalt(*d.reader); err != nil {
 			d.logf(logrus.WarnLevel, "Failed to clear halt on read endpoint: %v", err)
 		} else {
@@ -733,6 +755,8 @@ func (d *ZeroUSBDevice) RecoverDevice() error {
 	}
 
 	if d.writer != nil {
+		abortIfCancelled(ctx, nil)
+
 		if err := d.handle.ClearHalt(*d.writer); err != nil {
 			d.logf(logrus.WarnLevel, "Failed to clear halt on write endpoint: %v", err)
 		} else {
@@ -742,6 +766,8 @@ func (d *ZeroUSBDevice) RecoverDevice() error {
 
 	// Step 2: Reset the device (last resort)
 	if d.GetErrorCount() > 10 {
+		abortIfCancelled(ctx, nil)
+
 		d.logf(logrus.WarnLevel, "High error count (%d), attempting device reset", d.GetErrorCount())
 		if err := d.handle.ResetDevice(); err != nil {
 			d.logf(logrus.ErrorLevel, "Device reset failed: %v", err)
@@ -752,6 +778,7 @@ func (d *ZeroUSBDevice) RecoverDevice() error {
 	}
 
 	// Step 3: Clear the buffer to remove stale data
+	abortIfCancelled(ctx, nil)
 	d.ClearBuffer()
 
 	// Step 4: Reset error state
@@ -762,4 +789,16 @@ func (d *ZeroUSBDevice) RecoverDevice() error {
 
 	d.logf(logrus.InfoLevel, "Device recovery completed successfully")
 	return nil
+}
+
+func abortIfCancelled(ctx context.Context, cleanup func()) error {
+	select {
+	case <-ctx.Done():
+		if cleanup != nil {
+			cleanup()
+		}
+		return ctx.Err()
+	default:
+		return nil
+	}
 }

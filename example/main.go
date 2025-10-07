@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -23,6 +24,8 @@ const (
 	PAYLOAD_PART_B
 )
 
+var globalCtx context.Context
+
 func main() {
 	// Setup logging with detailed output
 	logger := logrus.New()
@@ -31,6 +34,8 @@ func main() {
 		FullTimestamp: true,
 		ForceColors:   true,
 	})
+
+	globalCtx = context.Background()
 
 	fmt.Println("=== ZeroUSB Fault Tolerance Diagnostic Tool ===")
 	fmt.Println("Protocol: Two-part request/response (Payload A & B)")
@@ -145,7 +150,7 @@ func testDeviceConnection(zusbInstance *zerousb.ZeroUSB, logger *logrus.Logger) 
 	fmt.Println("=== Testing Device Connection ===")
 
 	// Try direct connection
-	device, err := zusbInstance.Connect(nil, ExampleVendorId, ExampleProductId)
+	device, err := zusbInstance.Connect(globalCtx, nil, ExampleVendorId, ExampleProductId)
 	if err != nil {
 		logger.Errorf("Direct connection failed: %v", err)
 		fmt.Println("❌ Direct connection failed")
@@ -224,7 +229,7 @@ func testFaultTolerance(zusbInstance *zerousb.ZeroUSB, logger *logrus.Logger) {
 					// Check if we should attempt recovery
 					if !healthy && state == zerousb.DeviceStateError {
 						fmt.Println("🔧 Attempting automatic recovery...")
-						if recoveryErr := device.RecoverDevice(); recoveryErr != nil {
+						if recoveryErr := device.RecoverDevice(globalCtx); recoveryErr != nil {
 							fmt.Printf("❌ Recovery failed: %v\n", recoveryErr)
 						} else {
 							fmt.Println("✅ Recovery successful")
@@ -253,7 +258,7 @@ func monitorDeviceHealth(zusbInstance *zerousb.ZeroUSB, logger *logrus.Logger) {
 	scanner.Scan()
 
 	// Connect to device
-	device, err := zusbInstance.Connect(nil, ExampleVendorId, ExampleProductId)
+	device, err := zusbInstance.Connect(globalCtx, nil, ExampleVendorId, ExampleProductId)
 	if err != nil {
 		logger.Errorf("Connection failed: %v", err)
 		return
@@ -297,7 +302,7 @@ func monitorDeviceHealth(zusbInstance *zerousb.ZeroUSB, logger *logrus.Logger) {
 				// Trigger recovery if needed
 				if !healthy && state == zerousb.DeviceStateError {
 					fmt.Println("  🔧 Triggering automatic recovery...")
-					if recoveryErr := device.RecoverDevice(); recoveryErr != nil {
+					if recoveryErr := device.RecoverDevice(globalCtx); recoveryErr != nil {
 						fmt.Printf("  ❌ Recovery failed: %v\n", recoveryErr)
 					} else {
 						fmt.Println("  ✅ Recovery successful")
@@ -328,7 +333,7 @@ func stressTest(zusbInstance *zerousb.ZeroUSB, logger *logrus.Logger) {
 		}
 	}
 
-	device, err := zusbInstance.Connect(nil, ExampleVendorId, ExampleProductId)
+	device, err := zusbInstance.Connect(globalCtx, nil, ExampleVendorId, ExampleProductId)
 	if err != nil {
 		logger.Errorf("Connection failed: %v", err)
 		return
@@ -386,7 +391,7 @@ func stressTest(zusbInstance *zerousb.ZeroUSB, logger *logrus.Logger) {
 func showDeviceInfo(zusbInstance *zerousb.ZeroUSB, logger *logrus.Logger) {
 	fmt.Println("=== Device Information ===")
 
-	device, err := zusbInstance.Connect(nil, ExampleVendorId, ExampleProductId)
+	device, err := zusbInstance.Connect(globalCtx, nil, ExampleVendorId, ExampleProductId)
 	if err != nil {
 		logger.Errorf("Connection failed: %v", err)
 		return
