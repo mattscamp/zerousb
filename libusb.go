@@ -1061,7 +1061,7 @@ func (dh *DeviceHandle) BulkTransferIn(
 	if err != nil {
 		return nil, 0, err
 	}
-	return data, int(transferred), nil
+	return data[:transferred], int(transferred), nil
 }
 
 // ControlTransfer sends a transfer using a control endpoint for the given
